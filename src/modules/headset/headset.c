@@ -2763,6 +2763,8 @@ bool lovrHeadsetSetLayers(Layer** layers, uint32_t count, bool main) {
     total += layers[i]->info.stereo ? 2 : 1;
   }
 
+  // This counts a stereo layer as the 2 composition layers it submits, whereas the check in
+  // l_lovrHeadsetSetLayers counts Layer objects.  The two disagree, and this is the one that binds.
   lovrCheck(total <= MAX_LAYERS, "Too many layers");
 
   for (uint32_t i = 0; i < state.layerCount; i++) {
