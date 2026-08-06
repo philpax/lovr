@@ -2605,6 +2605,7 @@ Texture* lovrTextureCreate(const TextureInfo* info) {
       ((info->imageCount > 0 && lovrImageGetLevelCount(info->images[0]) < mipmaps) ? GPU_TEXTURE_COPY_SRC | GPU_TEXTURE_COPY_DST : 0),
     .srgb = srgb,
     .handle = info->handle,
+    .foreign = info->foreign,
     .label = info->label
   };
 
@@ -2636,10 +2637,18 @@ Texture* lovrTextureCreate(const TextureInfo* info) {
       mipmapTexture(state.stream, texture, lovrImageGetLevelCount(info->images[0]) - 1, ~0u);
       mtx_unlock(&state.lock);
     }
-  } else if (!gpu_texture_upload(texture->gpu, &(gpu_upload_info) { 0 })) {
-    lovrSetError("Failed to upload images to texture: %s", gpu_get_error());
-    lovrTextureDestroy(texture);
-    return NULL;
+  } else if (!info->foreign) {
+    // A texture with no images still submits an empty upload, whose only effect is a barrier out of
+    // VK_IMAGE_LAYOUT_UNDEFINED into the natural layout. A foreign image skips it: transitioning
+    // from UNDEFINED permits the driver to discard the contents it was imported for. The importer
+    // owns that transition instead. Keyed on foreign rather than on handle, because an XR swapchain
+    // texture also arrives by handle and does want the transition, since the runtime hands it back
+    // in an undefined layout on every acquire.
+    if (!gpu_texture_upload(texture->gpu, &(gpu_upload_info) { 0 })) {
+      lovrSetError("Failed to upload images to texture: %s", gpu_get_error());
+      lovrTextureDestroy(texture);
+      return NULL;
+    }
   }
 
   // Synchronization: Sample-only textures are exempt from sync tracking to reduce overhead.
