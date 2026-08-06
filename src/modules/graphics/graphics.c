@@ -3121,6 +3121,22 @@ bool lovrTextureGenerateMipmaps(Texture* texture, uint32_t base, uint32_t count)
   return true;
 }
 
+bool lovrTextureImportAcquire(Texture* texture, uint32_t oldLayout, uint32_t srcQueueFamily) {
+  lovrCheck(texture->info.foreign, "Texture must be created with 'foreign' set to acquire it");
+  mtx_lock(&state.lock);
+  gpu_import_acquire(state.stream, texture->root->gpu, oldLayout, srcQueueFamily);
+  mtx_unlock(&state.lock);
+  return true;
+}
+
+bool lovrTextureImportRelease(Texture* texture, uint32_t newLayout, uint32_t dstQueueFamily) {
+  lovrCheck(texture->info.foreign, "Texture must be created with 'foreign' set to release it");
+  mtx_lock(&state.lock);
+  gpu_import_release(state.stream, texture->root->gpu, newLayout, dstQueueFamily);
+  mtx_unlock(&state.lock);
+  return true;
+}
+
 Sampler* lovrTextureGetSampler(Texture* texture) {
   return texture->sampler;
 }

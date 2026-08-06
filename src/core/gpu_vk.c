@@ -2947,6 +2947,60 @@ void gpu_xr_release(gpu_stream* stream, gpu_texture* texture) {
   });
 }
 
+// Acquires an imported texture, transitioning it from its current layout to the natural layout and
+// taking queue family ownership. Unlike gpu_xr_acquire the old layout is a parameter, because an
+// imported image is created by the importer and holds whatever layout the importer gave it. The
+// source queue family is a parameter too: an image that arrives from outside Vulkan is owned by
+// VK_QUEUE_FAMILY_FOREIGN_EXT (which requires VK_EXT_queue_family_foreign), while
+// VK_QUEUE_FAMILY_IGNORED skips ownership acquisition entirely. Which is correct depends on how the
+// image was produced, so the caller decides.
+void gpu_import_acquire(gpu_stream* stream, gpu_texture* texture, uint32_t oldLayout, uint32_t srcQueueFamily) {
+  vkCmdPipelineBarrier2KHR(stream->commands, &(VkDependencyInfoKHR) {
+    .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR,
+    .imageMemoryBarrierCount = 1,
+    .pImageMemoryBarriers = &(VkImageMemoryBarrier2KHR) {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2_KHR,
+      .srcStageMask = VK_PIPELINE_STAGE_2_NONE_KHR,
+      .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,
+      .srcAccessMask = VK_ACCESS_2_NONE_KHR,
+      .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT_KHR | VK_ACCESS_2_MEMORY_WRITE_BIT_KHR,
+      .oldLayout = (VkImageLayout) oldLayout,
+      .newLayout = texture->layout,
+      .srcQueueFamilyIndex = srcQueueFamily,
+      .dstQueueFamilyIndex = srcQueueFamily == VK_QUEUE_FAMILY_IGNORED ? VK_QUEUE_FAMILY_IGNORED : state.queueFamilyIndex,
+      .image = texture->handle,
+      .subresourceRange.aspectMask = texture->aspect,
+      .subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS,
+      .subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS
+    }
+  });
+}
+
+// Releases an imported texture, transitioning it to the requested layout and giving queue family
+// ownership back. Mirrors gpu_import_acquire: the new layout and the destination queue family are
+// the caller's, and the source family is this device's.
+void gpu_import_release(gpu_stream* stream, gpu_texture* texture, uint32_t newLayout, uint32_t dstQueueFamily) {
+  vkCmdPipelineBarrier2KHR(stream->commands, &(VkDependencyInfoKHR) {
+    .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR,
+    .imageMemoryBarrierCount = 1,
+    .pImageMemoryBarriers = &(VkImageMemoryBarrier2KHR) {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2_KHR,
+      .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,
+      .dstStageMask = VK_PIPELINE_STAGE_2_NONE_KHR,
+      .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT_KHR,
+      .dstAccessMask = VK_ACCESS_2_NONE_KHR,
+      .oldLayout = texture->layout,
+      .newLayout = (VkImageLayout) newLayout,
+      .srcQueueFamilyIndex = dstQueueFamily == VK_QUEUE_FAMILY_IGNORED ? VK_QUEUE_FAMILY_IGNORED : state.queueFamilyIndex,
+      .dstQueueFamilyIndex = dstQueueFamily,
+      .image = texture->handle,
+      .subresourceRange.aspectMask = texture->aspect,
+      .subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS,
+      .subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS
+    }
+  });
+}
+
 // Entry
 
 bool gpu_init(gpu_config* config) {
