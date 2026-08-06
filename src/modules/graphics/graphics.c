@@ -1015,6 +1015,11 @@ void lovrGraphicsGetFeatures(GraphicsFeatures* features) {
   features->int64 = state.features.int64;
   features->int16 = state.features.int16;
   features->int8 = state.features.int8;
+  features->externalMemory = state.features.externalMemory;
+  features->externalMemoryFd = state.features.externalMemoryFd;
+  features->externalMemoryDmaBuf = state.features.externalMemoryDmaBuf;
+  features->imageDrmFormatModifier = state.features.imageDrmFormatModifier;
+  features->queueFamilyForeign = state.features.queueFamilyForeign;
 }
 
 void lovrGraphicsGetLimits(GraphicsLimits* limits) {

@@ -247,6 +247,11 @@ typedef struct {
   bool float16Int8;
   bool storage8;
   bool storage16;
+  bool externalMemory;
+  bool externalMemoryFd;
+  bool externalMemoryDmaBuf;
+  bool imageDrmFormatModifier;
+  bool queueFamilyForeign;
 } gpu_extensions;
 
 // State
@@ -3132,7 +3137,16 @@ bool gpu_init(gpu_config* config) {
       { "VK_EXT_shader_atomic_float", true, &state.extensions.atomicFloat },
       { "VK_KHR_shader_float16_int8", true, &state.extensions.float16Int8 },
       { "VK_KHR_8bit_storage", true, &state.extensions.storage8 },
-      { "VK_KHR_16bit_storage", true, &state.extensions.storage16 }
+      { "VK_KHR_16bit_storage", true, &state.extensions.storage16 },
+      // Optional: lets an embedder import externally allocated images (a
+      // dma-buf from another process, say) and wrap them with gpu_texture_init's
+      // handle path. VK_EXT_image_drm_format_modifier additionally requires
+      // VK_KHR_image_format_list, enabled above as formatList.
+      { "VK_KHR_external_memory", true, &state.extensions.externalMemory },
+      { "VK_KHR_external_memory_fd", true, &state.extensions.externalMemoryFd },
+      { "VK_EXT_external_memory_dma_buf", true, &state.extensions.externalMemoryDmaBuf },
+      { "VK_EXT_image_drm_format_modifier", true, &state.extensions.imageDrmFormatModifier },
+      { "VK_EXT_queue_family_foreign", true, &state.extensions.queueFamilyForeign }
     };
 
     uint32_t extensionCount = 0;
@@ -3377,6 +3391,11 @@ bool gpu_init(gpu_config* config) {
       config->features->int64 = enabled.features.shaderInt64;
       config->features->int16 = enabled.features.shaderInt16 && storage16Features.storageBuffer16BitAccess;
       config->features->int8 = float16int8Features.shaderInt8 && storage8Features.storageBuffer8BitAccess;
+      config->features->externalMemory = state.extensions.externalMemory;
+      config->features->externalMemoryFd = state.extensions.externalMemoryFd;
+      config->features->externalMemoryDmaBuf = state.extensions.externalMemoryDmaBuf;
+      config->features->imageDrmFormatModifier = state.extensions.imageDrmFormatModifier;
+      config->features->queueFamilyForeign = state.extensions.queueFamilyForeign;
 
       // Formats
       for (uint32_t i = 0; i < GPU_FORMAT_COUNT; i++) {
