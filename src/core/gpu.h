@@ -273,6 +273,10 @@ typedef struct {
   uint32_t usage;
   bool srgb;
   uintptr_t handle;
+  // Set alongside handle when the image already holds contents that must
+  // survive. The backend must not perform any transition from
+  // VK_IMAGE_LAYOUT_UNDEFINED over such an image, since that permits a discard.
+  bool foreign;
   const char* label;
 } gpu_texture_info;
 

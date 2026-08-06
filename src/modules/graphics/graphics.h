@@ -257,6 +257,10 @@ typedef struct {
   struct Image** images;
   char* label;
   uintptr_t handle;
+  // Set alongside handle when the image was allocated outside LÖVR and already
+  // holds contents that must survive being wrapped. It suppresses the initial
+  // layout transition, which would otherwise be allowed to discard them.
+  bool foreign;
 } TextureInfo;
 
 typedef struct {
