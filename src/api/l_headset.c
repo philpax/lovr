@@ -163,6 +163,11 @@ static int l_lovrHeadsetGetFeatures(lua_State* L) {
   return 1;
 }
 
+static int l_lovrHeadsetGetLayerLimit(lua_State* L) {
+  lua_pushinteger(L, lovrHeadsetGetLayerLimit());
+  return 1;
+}
+
 static int l_lovrHeadsetIsSeated(lua_State* L) {
   lua_pushboolean(L, lovrHeadsetIsSeated());
   return 1;
@@ -1092,6 +1097,7 @@ static const luaL_Reg lovrHeadset[] = {
   { "getName", l_lovrHeadsetGetName },
   { "getDriver", l_lovrHeadsetGetDriver },
   { "getFeatures", l_lovrHeadsetGetFeatures },
+  { "getLayerLimit", l_lovrHeadsetGetLayerLimit },
   { "isSeated", l_lovrHeadsetIsSeated },
   { "start", l_lovrHeadsetStart },
   { "stop", l_lovrHeadsetStop },

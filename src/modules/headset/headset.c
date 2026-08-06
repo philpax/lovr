@@ -988,6 +988,12 @@ void lovrHeadsetGetFeatures(HeadsetFeatures* features) {
   features->viveTrackers = state.extensions.viveTrackers;
 }
 
+// The most composition layers xrEndFrame will accept, or zero when there is no system to ask.  Note
+// a stereo layer costs 2 of these, the same way lovrHeadsetSetLayers counts them.
+uint32_t lovrHeadsetGetLayerLimit(void) {
+  return state.system ? state.systemProperties.graphicsProperties.maxLayerCount : 0;
+}
+
 bool lovrHeadsetIsSeated(void) {
   return state.config.seated;
 }
