@@ -186,6 +186,7 @@ bool lovrHeadsetIsConnected(void);
 const char* lovrHeadsetGetName(void);
 const char* lovrHeadsetGetDriver(void);
 void lovrHeadsetGetFeatures(HeadsetFeatures* features);
+uint32_t lovrHeadsetGetLayerLimit(void);
 bool lovrHeadsetIsSeated(void);
 bool lovrHeadsetStart(void);
 void lovrHeadsetStop(void);

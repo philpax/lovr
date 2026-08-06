@@ -49,6 +49,10 @@ var headset = {
     // TODO
   },
 
+  lovrHeadsetGetLayerLimit() {
+    return 0;
+  },
+
   lovrHeadsetIsSeated() {
     return false;
   },
