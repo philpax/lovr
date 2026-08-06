@@ -244,6 +244,11 @@ typedef struct {
   bool hostImageCopy;
   bool atomicFloat;
   bool calibratedTimestamps;
+  bool externalMemory;
+  bool externalMemoryFd;
+  bool externalMemoryDmaBuf;
+  bool imageDrmFormatModifier;
+  bool queueFamilyForeign;
 } gpu_extensions;
 
 // State
@@ -3125,7 +3130,16 @@ bool gpu_init(gpu_config* config) {
       { "VK_EXT_pipeline_creation_cache_control", true, &state.extensions.pipelineCacheControl },
       { "VK_EXT_memory_budget", true, &state.extensions.memoryBudget },
       { "VK_EXT_host_image_copy", true, &state.extensions.hostImageCopy },
-      { "VK_EXT_shader_atomic_float", true, &state.extensions.atomicFloat }
+      { "VK_EXT_shader_atomic_float", true, &state.extensions.atomicFloat },
+      // Optional: lets an embedder import externally allocated images (a
+      // dma-buf from another process, say) and wrap them with gpu_texture_init's
+      // handle path. VK_EXT_image_drm_format_modifier additionally requires
+      // VK_KHR_image_format_list, enabled above as formatList.
+      { "VK_KHR_external_memory", true, &state.extensions.externalMemory },
+      { "VK_KHR_external_memory_fd", true, &state.extensions.externalMemoryFd },
+      { "VK_EXT_external_memory_dma_buf", true, &state.extensions.externalMemoryDmaBuf },
+      { "VK_EXT_image_drm_format_modifier", true, &state.extensions.imageDrmFormatModifier },
+      { "VK_EXT_queue_family_foreign", true, &state.extensions.queueFamilyForeign }
     };
 
     uint32_t extensionCount = 0;
@@ -3337,6 +3351,11 @@ bool gpu_init(gpu_config* config) {
       config->features->float64 = enabled.features.shaderFloat64;
       config->features->int64 = enabled.features.shaderInt64;
       config->features->int16 = enabled.features.shaderInt16;
+      config->features->externalMemory = state.extensions.externalMemory;
+      config->features->externalMemoryFd = state.extensions.externalMemoryFd;
+      config->features->externalMemoryDmaBuf = state.extensions.externalMemoryDmaBuf;
+      config->features->imageDrmFormatModifier = state.extensions.imageDrmFormatModifier;
+      config->features->queueFamilyForeign = state.extensions.queueFamilyForeign;
 
       // Formats
       for (uint32_t i = 0; i < GPU_FORMAT_COUNT; i++) {

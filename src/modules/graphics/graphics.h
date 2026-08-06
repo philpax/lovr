@@ -54,6 +54,14 @@ typedef struct {
   bool float64;
   bool int64;
   bool int16;
+  // Whether the backend enabled the optional extensions that let an embedder
+  // import an externally allocated image and wrap it with TextureInfo.handle.
+  // Not exposed to Lua: only native code can reach the handle path.
+  bool externalMemory;
+  bool externalMemoryFd;
+  bool externalMemoryDmaBuf;
+  bool imageDrmFormatModifier;
+  bool queueFamilyForeign;
 } GraphicsFeatures;
 
 typedef struct {

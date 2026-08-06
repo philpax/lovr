@@ -809,6 +809,15 @@ typedef struct {
   bool float64;
   bool int64;
   bool int16;
+  // Whether the backend enabled the optional extensions that let an embedder
+  // import externally allocated images. Reported rather than assumed, because
+  // an embedder holding the raw device has no other way to learn what is
+  // actually in the enabled extension list.
+  bool externalMemory;
+  bool externalMemoryFd;
+  bool externalMemoryDmaBuf;
+  bool imageDrmFormatModifier;
+  bool queueFamilyForeign;
 } gpu_features;
 
 typedef struct {
