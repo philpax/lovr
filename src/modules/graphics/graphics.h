@@ -273,6 +273,11 @@ bool lovrTextureCopy(Texture* src, Texture* dst, uint32_t srcOffset[4], uint32_t
 bool lovrTextureBlit(Texture* src, Texture* dst, uint32_t srcOffset[4], uint32_t dstOffset[4], uint32_t srcExtent[3], uint32_t dstExtent[3], FilterMode filter);
 bool lovrTextureClear(Texture* texture, float value[4], uint32_t layer, uint32_t layerCount, uint32_t level, uint32_t levelCount);
 bool lovrTextureGenerateMipmaps(Texture* texture, uint32_t base, uint32_t count);
+// Records a layout and queue family transition for a texture created with TextureInfo.foreign,
+// into the same stream the transfer functions above record into. The layout and queue family
+// values are the graphics backend's own; see gpu_import_acquire in core/gpu.h.
+bool lovrTextureImportAcquire(Texture* texture, uint32_t oldLayout, uint32_t srcQueueFamily);
+bool lovrTextureImportRelease(Texture* texture, uint32_t newLayout, uint32_t dstQueueFamily);
 Sampler* lovrTextureGetSampler(Texture* texture);
 void lovrTextureSetSampler(Texture* texture, Sampler* sampler);
 Material* lovrTextureToMaterial(Texture* texture);

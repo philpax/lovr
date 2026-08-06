@@ -768,6 +768,11 @@ void gpu_tally_begin(gpu_stream* stream, gpu_tally* tally, uint32_t index);
 void gpu_tally_finish(gpu_stream* stream, gpu_tally* tally, uint32_t index);
 void gpu_xr_acquire(gpu_stream* stream, gpu_texture* texture);
 void gpu_xr_release(gpu_stream* stream, gpu_texture* texture);
+// For a texture created with gpu_texture_info.foreign. The layout and queue family values are the
+// backend's own: on Vulkan, a VkImageLayout and either VK_QUEUE_FAMILY_FOREIGN_EXT or
+// VK_QUEUE_FAMILY_IGNORED. Acquire names where the image is coming from, release where it is going.
+void gpu_import_acquire(gpu_stream* stream, gpu_texture* texture, uint32_t oldLayout, uint32_t srcQueueFamily);
+void gpu_import_release(gpu_stream* stream, gpu_texture* texture, uint32_t newLayout, uint32_t dstQueueFamily);
 
 // Entry
 
