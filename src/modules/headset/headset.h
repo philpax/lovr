@@ -6,7 +6,9 @@
 
 #define HAND_JOINT_COUNT 26
 #define BODY_JOINT_COUNT 24
-#define MAX_LAYERS 10
+// Bounds the layer array lovr.headset.setLayers accepts, and with it one static array in the
+// headset module plus three stack arrays in lovrHeadsetSubmit and l_lovrHeadsetSetLayers.
+#define MAX_LAYERS 64
 
 struct Model;
 struct ModelData;
