@@ -276,6 +276,8 @@ typedef struct {
   // Set alongside handle when the image already holds contents that must
   // survive. The backend must not perform any transition from
   // VK_IMAGE_LAYOUT_UNDEFINED over such an image, since that permits a discard.
+  // It is also what gpu_import_acquire and gpu_import_release require: both
+  // reject a texture that was not created with it.
   bool foreign;
   const char* label;
 } gpu_texture_info;

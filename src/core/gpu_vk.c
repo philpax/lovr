@@ -59,6 +59,7 @@ struct gpu_texture {
   uint8_t format;
   bool hostCopy;
   bool imported;
+  bool foreign;
   bool srgb;
 };
 
@@ -684,7 +685,12 @@ bool gpu_texture_init(gpu_texture* texture, gpu_texture_info* info) {
   texture->baseLevel = 0;
   texture->format = info->format;
   texture->hostCopy = false;
+  texture->foreign = info->foreign;
   texture->srgb = info->srgb;
+
+  // A foreign image is one somebody else filled, so there is nothing to create and nothing to
+  // discard: its contents arrive with the handle. Without one there is no image to be foreign to.
+  ASSERT(!info->foreign || info->handle, "Texture must have a handle to be foreign") return false;
 
   gpu_texture_view_info viewInfo = {
     .source = texture,
@@ -2955,6 +2961,7 @@ void gpu_xr_release(gpu_stream* stream, gpu_texture* texture) {
 // VK_QUEUE_FAMILY_IGNORED skips ownership acquisition entirely. Which is correct depends on how the
 // image was produced, so the caller decides.
 void gpu_import_acquire(gpu_stream* stream, gpu_texture* texture, uint32_t oldLayout, uint32_t srcQueueFamily) {
+  ASSERT(texture->foreign, "Texture must be created with 'foreign' set to acquire it") return;
   vkCmdPipelineBarrier2KHR(stream->commands, &(VkDependencyInfoKHR) {
     .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR,
     .imageMemoryBarrierCount = 1,
@@ -2980,6 +2987,7 @@ void gpu_import_acquire(gpu_stream* stream, gpu_texture* texture, uint32_t oldLa
 // ownership back. Mirrors gpu_import_acquire: the new layout and the destination queue family are
 // the caller's, and the source family is this device's.
 void gpu_import_release(gpu_stream* stream, gpu_texture* texture, uint32_t newLayout, uint32_t dstQueueFamily) {
+  ASSERT(texture->foreign, "Texture must be created with 'foreign' set to release it") return;
   vkCmdPipelineBarrier2KHR(stream->commands, &(VkDependencyInfoKHR) {
     .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR,
     .imageMemoryBarrierCount = 1,
