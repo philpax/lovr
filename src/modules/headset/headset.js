@@ -69,6 +69,10 @@ var headset = {
     return false;
   },
 
+  lovrHeadsetGetSessionGeneration() {
+    return 0;
+  },
+
   lovrHeadsetIsVisible() {
     return false;
   },

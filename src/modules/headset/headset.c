@@ -330,6 +330,11 @@ static struct {
   } extensions;
 } state;
 
+// The generation of the session in `state`, incremented when one is created.  Outside the struct on
+// purpose: lovrHeadsetDestroy zeroes that, and a counter that restarted with the module would let a
+// session after a restart carry the same number as one before it.
+static uint32_t sessionGeneration;
+
 // Helpers
 
 static bool lovrSwapchainInit(Swapchain* swapchain, uint32_t width, uint32_t height, uint32_t flags);
@@ -1054,6 +1059,12 @@ bool lovrHeadsetStart(void) {
     };
 
     XR(xrCreateSession(state.instance, &info, &state.session), "xrCreateSession");
+
+    // Skipping zero on wrap keeps it the answer for "there is no session" alone.  A start that
+    // fails below leaves the number spent rather than reusing it, which is the point: the session
+    // it belonged to existed, however briefly.
+    if (++sessionGeneration == 0) sessionGeneration = 1;
+
     XRG(xrAttachSessionActionSets(state.session, &attachInfo), "xrAttachSessionActionSets", stop);
 
 #ifdef __ANDROID__
@@ -1299,6 +1310,14 @@ void lovrHeadsetStop(void) {
 
 bool lovrHeadsetIsActive(void) {
   return state.session;
+}
+
+// Zero when there is no session, and otherwise a number no other session of this process has had,
+// so a caller that holds objects belonging to a session can tell "still the same one" from "another
+// one has been started since".  lovrHeadsetIsActive cannot answer that: a stop and a start in the
+// same frame read as active both before and after, while every swapchain in between was destroyed.
+uint32_t lovrHeadsetGetSessionGeneration(void) {
+  return state.session ? sessionGeneration : 0;
 }
 
 bool lovrHeadsetIsVisible(void) {
