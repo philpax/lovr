@@ -204,7 +204,7 @@ static int l_lovrMat4Mul(lua_State* L) {
       }
     } else {
 #ifdef LOVR_USE_LUAU
-      lua_pushvector(L, v[0], v[1], v[2]);
+      lua_pushvector(L, v[0], v[1], v[2], 0.f);
 #endif
     }
     return 1;
@@ -377,7 +377,7 @@ static int l_lovrMat4__mul(lua_State* L) {
     float out[3];
     vec3_init(out, v);
     mat4_mulPoint(lovrMat4GetData(self), out);
-    lua_pushvector(L, out[0], out[1], out[2]);
+    lua_pushvector(L, out[0], out[1], out[2], 0.f);
     return 1;
   }
 #endif

@@ -27,6 +27,7 @@ option(LOVR_USE_GLFW "Use GLFW for desktop windows" ON)
 option(LOVR_USE_LUAJIT "Use LuaJIT instead of Lua" ON)
 option(LOVR_USE_LUAU "Use Luau instead of Lua" OFF)
 option(LOVR_EXPORT_LUA_SYMBOLS "Export the Lua C API so an external consumer can link it" OFF)
+option(LOVR_LUAU_ANALYSIS "Link Luau's type checker into the library" OFF)
 option(LOVR_USE_GLSLANG "Use glslang to compile GLSL shaders" ON)
 option(LOVR_USE_VULKAN "Use the Vulkan renderer" ON)
 option(LOVR_USE_WEBGPU "Use the WebGPU renderer" OFF)
@@ -125,6 +126,7 @@ if(LOVR_USE_LUAU)
   set(LUAU_BUILD_TESTS OFF CACHE BOOL "")
   set(LUAU_BUILD_CLI OFF CACHE BOOL "")
   set(LUAU_EXTERN_C ON CACHE BOOL "")
+  set(LUAU_VECTOR_FOUR_WIDE ON CACHE BOOL "")
   add_subdirectory(deps/luau luau)
   foreach(target Luau.VM Luau.Compiler)
     get_target_property(defs ${target} INTERFACE_COMPILE_DEFINITIONS)
@@ -139,8 +141,12 @@ if(LOVR_USE_LUAU)
   else()
     set_target_properties(Luau.Config Luau.Require PROPERTIES EXCLUDE_FROM_ALL 1)
   endif()
+  if(LOVR_LUAU_ANALYSIS)
+    list(APPEND LOVR_LUA Luau.Analysis)
+  else()
+    set_target_properties(Luau.Analysis PROPERTIES EXCLUDE_FROM_ALL 1)
+  endif()
   set_target_properties(
-    Luau.Analysis
     Luau.CLI.lib
     Luau.CodeGen
     PROPERTIES EXCLUDE_FROM_ALL 1
@@ -368,6 +374,21 @@ if(LOVR_USE_LUAU AND LOVR_EXPORT_LUA_SYMBOLS)
     "-Wl,--undefined=lua_gcdump"
     "-Wl,--undefined=luarequire_pushproxyrequire"
     "-Wl,--undefined=lua_vm_is_topframe"
+  )
+endif()
+
+if(LOVR_USE_LUAU AND LOVR_LUAU_ANALYSIS)
+  # Nothing in LOVR references the type checker, so a plain archive reference
+  # pulls in none of it and the library exports nothing. `--undefined=` takes
+  # one symbol at a time, which does not suit a C++ surface, so the archive
+  # goes in whole.
+  #
+  # It belongs in the library rather than in a consumer's own binary: two
+  # copies of Luau unify their FFlag statics as GNU unique symbols, which makes
+  # a flag register onto `FValue<bool>::list` twice and its `next` point at
+  # itself, and static initialisation then spins on the first traversal.
+  target_link_options(lovr PRIVATE
+    "-Wl,--whole-archive" "$<TARGET_FILE:Luau.Analysis>" "-Wl,--no-whole-archive"
   )
 endif()
 
