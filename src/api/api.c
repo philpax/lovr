@@ -294,7 +294,9 @@ void luax_registerloader(lua_State* L, lua_CFunction loader, int index, int upva
   lua_getglobal(L, "table");
   lua_getfield(L, -1, "insert");
   lua_getglobal(L, "package");
-#if LUA_VERSION_NUM == 501
+  // The Luau fork's require reads `package.loaders` (Lua 5.1 style), not
+  // `package.searchers`; LÖVR's loader registration must target the same name.
+#if defined(LOVR_USE_LUAU) || LUA_VERSION_NUM == 501
   lua_getfield(L, -1, "loaders");
 #else
   lua_getfield(L, -1, "searchers");
