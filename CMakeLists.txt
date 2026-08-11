@@ -26,6 +26,7 @@ option(LOVR_ENABLE_UTF8 "Enable the utf8 module" ON)
 option(LOVR_USE_GLFW "Use GLFW for desktop windows" ON)
 option(LOVR_USE_LUAJIT "Use LuaJIT instead of Lua" ON)
 option(LOVR_USE_LUAU "Use Luau instead of Lua" OFF)
+option(LOVR_EXPORT_LUA_SYMBOLS "Export the Lua C API so an external consumer can link it" OFF)
 option(LOVR_USE_GLSLANG "Use glslang to compile GLSL shaders" ON)
 option(LOVR_USE_VULKAN "Use the Vulkan renderer" ON)
 option(LOVR_USE_WEBGPU "Use the WebGPU renderer" OFF)
@@ -130,15 +131,20 @@ if(LOVR_USE_LUAU)
     list(FILTER defs EXCLUDE REGEX [[LUA.*_API]])
     set_target_properties(${target} PROPERTIES INTERFACE_COMPILE_DEFINITIONS "${defs}")
   endforeach()
+  set(LOVR_LUA Luau.VM Luau.Compiler Luau.Ast)
+  if(LOVR_EXPORT_LUA_SYMBOLS)
+    # `luarequire_pushproxyrequire` lives in `Luau.Require`, and `Luau.Config`
+    # is its dependency. Neither is reachable unless they are linked in.
+    list(APPEND LOVR_LUA Luau.Require Luau.Config)
+  else()
+    set_target_properties(Luau.Config Luau.Require PROPERTIES EXCLUDE_FROM_ALL 1)
+  endif()
   set_target_properties(
     Luau.Analysis
     Luau.CLI.lib
     Luau.CodeGen
-    Luau.Config
-    Luau.Require
     PROPERTIES EXCLUDE_FROM_ALL 1
   )
-  set(LOVR_LUA Luau.VM Luau.Compiler Luau.Ast)
   set_target_properties(${LOVR_LUA} PROPERTIES POSITION_INDEPENDENT_CODE 1)
 elseif(LOVR_USE_LUAJIT AND NOT EMSCRIPTEN)
   if(LOVR_SYSTEM_LUA)
@@ -349,6 +355,21 @@ target_link_libraries(lovr
   ${LOVR_PTHREADS}
   ${EMSCRIPTEN_LINKER_FLAGS}
 )
+
+if(LOVR_USE_LUAU AND LOVR_EXPORT_LUA_SYMBOLS)
+  # A consumer that links the Lua C API out of this library needs the symbols
+  # to be present in it. Nothing in LOVR references these, so `--as-needed`
+  # drops the archive members that define them and the exports go with them;
+  # `--undefined=` forces each member in, and the default visibility
+  # (`ENABLE_EXPORTS`) exports it.
+  target_link_options(lovr PRIVATE
+    "-Wl,--undefined=lua_error"
+    "-Wl,--undefined=lua_getmetatablepointer"
+    "-Wl,--undefined=lua_gcdump"
+    "-Wl,--undefined=luarequire_pushproxyrequire"
+    "-Wl,--undefined=lua_vm_is_topframe"
+  )
+endif()
 
 if(LOVR_SANITIZE)
   if(MSVC)
