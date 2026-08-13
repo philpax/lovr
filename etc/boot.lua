@@ -125,17 +125,20 @@ function lovr.boot()
   local ok, failure = true, nil
   if source ~= bundle and not lovr.filesystem.mount(source) then
     ok, failure = false, ('Failed to load project at %q\nMake sure the path or archive is valid.'):format(source)
-  elseif not lovr.filesystem.isFile(main) then
-    local location = source == '.' and '' or (' in %q'):format(source:match('[^/\\]+[/\\]?$'))
-    ok, failure = false, ('No %s file found%s.\nThe project may be packaged incorrectly.'):format(main, location)
   else
     lovr.filesystem.setSource(source)
     local confPath = _VERSION == 'Luau' and lovr.filesystem.isFile('conf.luau') and 'conf.luau' or 'conf.lua'
-    if lovr.filesystem.getRealDirectory(confPath) == lovr.filesystem.getRealDirectory(main) then
+    local mainDirectory = lovr.filesystem.getRealDirectory(main)
+    local confDirectory = lovr.filesystem.getRealDirectory(confPath)
+    if confDirectory and confDirectory == (mainDirectory or source) then
       ok, failure = pcall(require, 'conf')
       if ok and lovr.conf then
         ok, failure = pcall(lovr.conf, conf)
       end
+    end
+    if ok and not lovr.filesystem.isFile(main) then
+      local location = source == '.' and '' or (' in %q'):format(source:match('[^/\\]+[/\\]?$'))
+      ok, failure = false, ('No %s file found%s.\nThe project may be packaged incorrectly.'):format(main, location)
     end
   end
 
