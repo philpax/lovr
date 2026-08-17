@@ -177,6 +177,11 @@ static int l_lovrHeadsetGetSessionGeneration(lua_State* L) {
   return 1;
 }
 
+static int l_lovrHeadsetIsMainSessionVisible(lua_State* L) {
+  lua_pushboolean(L, lovrHeadsetIsMainSessionVisible());
+  return 1;
+}
+
 static int l_lovrHeadsetIsVisible(lua_State* L) {
   lua_pushboolean(L, lovrHeadsetIsVisible());
   return 1;
@@ -1027,6 +1032,7 @@ static const luaL_Reg lovrHeadset[] = {
   { "stop", l_lovrHeadsetStop },
   { "isActive", l_lovrHeadsetIsActive },
   { "getSessionGeneration", l_lovrHeadsetGetSessionGeneration },
+  { "isMainSessionVisible", l_lovrHeadsetIsMainSessionVisible },
   { "isVisible", l_lovrHeadsetIsVisible },
   { "isFocused", l_lovrHeadsetIsFocused },
   { "isMounted", l_lovrHeadsetIsMounted },

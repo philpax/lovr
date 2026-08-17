@@ -274,6 +274,10 @@ static struct {
   XrPassthroughLayerFB passthroughLayerHandle;
   bool passthroughActive;
   bool mounted;
+  // Whether another application is presenting.  False until the runtime says otherwise, which is
+  // also what it stays on a runtime that never sends the event: an overlay with nothing under it
+  // is the case that wants a background drawn, so assuming it is the safe default.
+  bool mainSessionVisible;
   XrDebugUtilsMessengerEXT messenger;
   struct {
     bool battery;
@@ -1320,6 +1324,16 @@ uint32_t lovrHeadsetGetSessionGeneration(void) {
   return state.session ? sessionGeneration : 0;
 }
 
+// Whether an application other than this one is presenting, which only an overlay session can be
+// told.  XR_EXTX_overlay reports it through XR_TYPE_EVENT_DATA_MAIN_SESSION_VISIBILITY_CHANGED_EXTX,
+// and a session that did not request the extension never receives one, so this stays false there.
+//
+// An overlay uses it to decide whether anything is behind it.  Drawing an opaque background over
+// another application's frame is the failure it prevents.
+bool lovrHeadsetIsMainSessionVisible(void) {
+  return state.mainSessionVisible;
+}
+
 bool lovrHeadsetIsVisible(void) {
   return state.sessionState >= XR_SESSION_STATE_VISIBLE;
 }
@@ -1399,6 +1413,13 @@ bool lovrHeadsetPollEvents(void) {
       case XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR:
         visibilityMaskDirty = true;
         break;
+#ifdef XR_EXTX_overlay
+      case XR_TYPE_EVENT_DATA_MAIN_SESSION_VISIBILITY_CHANGED_EXTX: {
+        XrEventDataMainSessionVisibilityChangedEXTX* event = (XrEventDataMainSessionVisibilityChangedEXTX*) &e;
+        state.mainSessionVisible = event->visible;
+        break;
+      }
+#endif
       case XR_TYPE_EVENT_DATA_USER_PRESENCE_CHANGED_EXT: {
         XrEventDataUserPresenceChangedEXT* event = (XrEventDataUserPresenceChangedEXT*) &e;
         state.mounted = event->isUserPresent;

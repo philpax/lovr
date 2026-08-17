@@ -73,6 +73,11 @@ var headset = {
     return 0;
   },
 
+  // WebXR has no overlay session, so nothing is ever presenting behind this one.
+  lovrHeadsetIsMainSessionVisible() {
+    return false;
+  },
+
   lovrHeadsetIsVisible() {
     return false;
   },

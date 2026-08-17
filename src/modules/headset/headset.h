@@ -192,6 +192,7 @@ bool lovrHeadsetStart(void);
 void lovrHeadsetStop(void);
 bool lovrHeadsetIsActive(void);
 uint32_t lovrHeadsetGetSessionGeneration(void);
+bool lovrHeadsetIsMainSessionVisible(void);
 bool lovrHeadsetIsVisible(void);
 bool lovrHeadsetIsFocused(void);
 bool lovrHeadsetIsMounted(void);
