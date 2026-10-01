@@ -96,7 +96,8 @@ function lovr.boot()
       return function()
         print(table.concat({
           'usage: lovr <source>',
-          '<source> can be a Lua file, a folder with a main.lua file, or a zip archive'
+          ('<source> can be a Lua file, a folder with a %s file, or a zip archive')
+            :format(_VERSION == 'Luau' and 'main.luau or main.lua' or 'main.lua')
         }, '\n'))
         return 0
       end
@@ -105,18 +106,21 @@ function lovr.boot()
 
   -- Figure out source archive and main module.  CLI places source at arg[0]
 
+  -- Under Luau a main file can be .luau, and a folder or archive prefers main.luau over main.lua,
+  -- the same way conf.luau is preferred over conf.lua below.  A folder's main file can only be
+  -- chosen once the source is mounted, so main stays nil until then.
+
+  local mainPattern = _VERSION == 'Luau' and '[^/\\]+%.luau?$' or '[^/\\]+%.lua$'
   local source, main
   if (cli or not fused) and arg[0] then
-    if arg[0]:match('[^/\\]+%.lua$') then
+    if arg[0]:match(mainPattern) then
       source = arg[0]:match('[/\\]') and arg[0]:match('(.+)[/\\][^/\\]+$') or '.'
-      main = arg[0]:match('[^/\\]+%.lua$')
+      main = arg[0]:match(mainPattern)
     else
       source = arg[0]
-      main = 'main.lua'
     end
   elseif fused then
     source = bundle
-    main = 'main.lua'
   end
 
   -- Mount source archive, make sure it's got the main file, and load conf.lua
@@ -126,6 +130,10 @@ function lovr.boot()
     ok, failure = false, ('Failed to load project at %q\nMake sure the path or archive is valid.'):format(source)
   else
     lovr.filesystem.setSource(source)
+    if not main then
+      local luau = _VERSION == 'Luau' and (lovr.filesystem.isFile('main.luau') or not lovr.filesystem.isFile('main.lua'))
+      main = luau and 'main.luau' or 'main.lua'
+    end
     local confPath = _VERSION == 'Luau' and lovr.filesystem.isFile('conf.luau') and 'conf.luau' or 'conf.lua'
     if lovr.filesystem.getRealDirectory(confPath) == source then
       ok, failure = pcall(require, 'conf')
@@ -181,7 +189,7 @@ function lovr.boot()
     error(failure)
   end
 
-  require(main:sub(1, -5))
+  require((main:gsub('%.luau?$', '')))
 
   return lovr.run()
 end
