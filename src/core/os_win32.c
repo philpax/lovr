@@ -367,7 +367,7 @@ static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM param, LPAR
         os_button_action action = pressed ? BUTTON_PRESSED : BUTTON_RELEASED;
         bool repeat = pressed && !!(HIWORD(lparam) & KF_REPEAT);
 
-        if (state.onKey) state.onKey(action, key, scancode, repeat);
+        if (state.onKey) state.onKey(action, key, scancode, repeat, NULL);
       }
       break;
     }

@@ -129,6 +129,15 @@ typedef enum {
   OS_KEY_COUNT
 } os_key;
 
+typedef struct os_key_modifiers {
+  bool shift;
+  bool control;
+  bool alt;
+  bool super;
+  bool capsLock;
+  bool numLock;
+} os_key_modifiers;
+
 typedef enum {
   BUTTON_PRESSED,
   BUTTON_RELEASED
@@ -142,7 +151,8 @@ typedef void fn_quit(void);
 typedef void fn_visible(bool visible);
 typedef void fn_focus(bool focused);
 typedef void fn_resize(uint32_t width, uint32_t height);
-typedef void fn_key(os_button_action action, os_key key, uint32_t scancode, bool repeat);
+// Modifiers are a per-event snapshot, or NULL when unavailable, valid only during the callback.
+typedef void fn_key(os_button_action action, os_key key, uint32_t scancode, bool repeat, const os_key_modifiers* modifiers);
 typedef void fn_text(uint32_t codepoint);
 typedef void fn_mouse_button(int button, bool pressed);
 typedef void fn_mouse_move(double x, double y);

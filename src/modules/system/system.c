@@ -18,14 +18,16 @@ static struct {
   double scrollDelta;
 } state;
 
-static void onKey(os_button_action action, os_key key, uint32_t scancode, bool repeat) {
+static void onKey(os_button_action action, os_key key, uint32_t scancode, bool repeat, const os_key_modifiers* modifiers) {
   if (repeat && !state.keyRepeat) return;
   state.keyState[key] = (action == BUTTON_PRESSED);
   lovrEventPush((Event) {
     .type = action == BUTTON_PRESSED ? EVENT_KEYPRESSED : EVENT_KEYRELEASED,
     .data.key.code = key,
     .data.key.scancode = scancode,
-    .data.key.repeat = repeat
+    .data.key.repeat = repeat,
+    .data.key.hasModifiers = modifiers != NULL,
+    .data.key.modifiers = modifiers ? *modifiers : (os_key_modifiers) { 0 }
   });
 }
 

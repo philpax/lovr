@@ -285,7 +285,15 @@ static void onKeyboardEvent(GLFWwindow* window, int k, int scancode, int a, int 
     }
     os_button_action action = (a == GLFW_RELEASE) ? BUTTON_RELEASED : BUTTON_PRESSED;
     bool repeat = (a == GLFW_REPEAT);
-    glfwState.onKeyboardEvent(action, key, scancode, repeat);
+    os_key_modifiers modifiers = {
+      .shift = (mods & GLFW_MOD_SHIFT) != 0,
+      .control = (mods & GLFW_MOD_CONTROL) != 0,
+      .alt = (mods & GLFW_MOD_ALT) != 0,
+      .super = (mods & GLFW_MOD_SUPER) != 0,
+      .capsLock = (mods & GLFW_MOD_CAPS_LOCK) != 0,
+      .numLock = (mods & GLFW_MOD_NUM_LOCK) != 0
+    };
+    glfwState.onKeyboardEvent(action, key, scancode, repeat, &modifiers);
   }
 }
 
@@ -377,6 +385,8 @@ bool os_window_open(const os_window_config* config) {
   if (!glfwState.window) {
     return false;
   }
+
+  glfwSetInputMode(glfwState.window, GLFW_LOCK_KEY_MODS, GLFW_TRUE);
 
   if (center && !config->fullscreen) {
     int w, h;

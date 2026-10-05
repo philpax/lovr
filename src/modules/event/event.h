@@ -1,3 +1,4 @@
+#include "core/os.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -63,6 +64,8 @@ typedef struct {
   uint32_t code;
   uint32_t scancode;
   bool repeat;
+  bool hasModifiers;
+  os_key_modifiers modifiers;
 } KeyEvent;
 
 typedef struct {

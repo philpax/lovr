@@ -36,6 +36,30 @@ StringEntry lovrEventType[] = {
   { 0 }
 };
 
+static void pushKeyModifiers(lua_State* L, const KeyEvent* event) {
+  if (!event->hasModifiers) {
+    lua_pushnil(L);
+    return;
+  }
+
+  lua_createtable(L, 0, 6);
+  lua_pushboolean(L, event->modifiers.shift);
+  lua_setfield(L, -2, "shift");
+  lua_pushboolean(L, event->modifiers.control);
+  lua_setfield(L, -2, "control");
+  lua_pushboolean(L, event->modifiers.alt);
+  lua_setfield(L, -2, "alt");
+  lua_pushboolean(L, event->modifiers.super);
+  lua_setfield(L, -2, "super");
+  lua_pushboolean(L, event->modifiers.capsLock);
+  lua_setfield(L, -2, "capsLock");
+  lua_pushboolean(L, event->modifiers.numLock);
+  lua_setfield(L, -2, "numLock");
+#ifdef LOVR_USE_LUAU
+  lua_setreadonly(L, -1, true);
+#endif
+}
+
 static int nextEvent(lua_State* L) {
   Event event;
 
@@ -83,12 +107,14 @@ static int nextEvent(lua_State* L) {
       luax_pushenum(L, KeyboardKey, event.data.key.code);
       lua_pushinteger(L, event.data.key.scancode);
       lua_pushboolean(L, event.data.key.repeat);
-      return 4;
+      pushKeyModifiers(L, &event.data.key);
+      return 5;
 
     case EVENT_KEYRELEASED:
       luax_pushenum(L, KeyboardKey, event.data.key.code);
       lua_pushinteger(L, event.data.key.scancode);
-      return 3;
+      pushKeyModifiers(L, &event.data.key);
+      return 4;
 
     case EVENT_TEXTINPUT:
       lua_pushlstring(L, event.data.text.utf8, strnlen(event.data.text.utf8, 4));

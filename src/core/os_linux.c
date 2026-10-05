@@ -291,7 +291,7 @@ void os_poll_events(double timeout) {
           os_button_action action = press ? BUTTON_PRESSED : BUTTON_RELEASED;
           bool repeat = press && state.keyDown[key];
           state.keyDown[key] = press;
-          if (state.onKey) state.onKey(action, key, keycode, repeat);
+          if (state.onKey) state.onKey(action, key, keycode, repeat, NULL);
         }
 
         if (press && state.onText) {

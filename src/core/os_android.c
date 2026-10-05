@@ -134,7 +134,7 @@ static int32_t onInputEvent(struct android_app* app, AInputEvent* event) {
   uint32_t scancode = AKeyEvent_getScanCode(event);
   bool repeat = AKeyEvent_getRepeatCount(event) > 0;
 
-  state.onKeyboardEvent(action, key, scancode, repeat);
+  state.onKeyboardEvent(action, key, scancode, repeat, NULL);
 
   // Text event
   if (action == BUTTON_PRESSED && state.onTextEvent) {

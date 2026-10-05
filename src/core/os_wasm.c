@@ -196,7 +196,7 @@ static EM_BOOL onKeyEvent(int type, const EmscriptenKeyboardEvent* data, void* u
   os_button_action action = type == EMSCRIPTEN_EVENT_KEYDOWN ? BUTTON_PRESSED : BUTTON_RELEASED;
 
   if (state.onKeyboardEvent) {
-    state.onKeyboardEvent(action, key, scancode, data->repeat);
+    state.onKeyboardEvent(action, key, scancode, data->repeat, NULL);
   }
 
   return false;
