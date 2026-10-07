@@ -345,11 +345,11 @@ static bool frustumEdges(void) {
     CHECK(lovrOpenVRFrameProjection(tangents, .1f, finite ? 100.f : 0.f, matrix));
     CHECK(closeTo(matrix[0] * tangents[0] - matrix[8], -1));
     CHECK(closeTo(matrix[0] * tangents[1] - matrix[8], 1));
-    // OpenVR's raw vertical tangents use the opposite sign to physical eye-space Y.
-    CHECK(closeTo(matrix[5] * -tangents[2] - matrix[9], -1));
-    CHECK(closeTo(matrix[5] * -tangents[3] - matrix[9], 1));
+    // OpenVR's raw bottom is the physical upper edge; Vulkan flips the whole Y row.
+    CHECK(closeTo(matrix[5] * tangents[3] - matrix[9], -1));
+    CHECK(closeTo(matrix[5] * tangents[2] - matrix[9], 1));
     float oracle[16];
-    mat4_fov(oracle, -atanf(tangents[0]), atanf(tangents[1]), -atanf(tangents[2]), atanf(tangents[3]),
+    mat4_fov(oracle, -atanf(tangents[0]), atanf(tangents[1]), atanf(tangents[3]), -atanf(tangents[2]),
       .1f, finite ? 100.f : 0.f);
     // mat4_fov uses a different finite-depth convention; compare the independent XY terms only.
     unsigned xy[] = { 0, 5, 8, 9 };

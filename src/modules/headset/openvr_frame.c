@@ -138,7 +138,7 @@ bool lovrOpenVRFrameProjection(const float tangents[4], float near, float far, f
   projection[0] = 2. / (right - left);
   projection[5] = 2. / (top - bottom);
   projection[8] = (right + left) / (right - left);
-  projection[9] = (top + bottom) / (bottom - top);
+  projection[9] = (top + bottom) / (top - bottom);
   projection[10] = far == 0.f ? 0.f : (double) near / (far - (double) near);
   projection[11] = -1.f;
   projection[14] = far == 0.f ? near : (double) near * far / (far - (double) near);

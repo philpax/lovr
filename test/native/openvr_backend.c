@@ -469,8 +469,8 @@ static bool asymmetricViewAngles(void) {
     CHECK(lovrHeadsetOpenVROps.HeadsetGetViewAngles(eye, &left, &right, &up, &down));
     CHECK(fabsf(left + atanf(tangents[eye][0])) < 1e-5f);
     CHECK(fabsf(right - atanf(tangents[eye][1])) < 1e-5f);
-    CHECK(fabsf(up + atanf(tangents[eye][2])) < 1e-5f);
-    CHECK(fabsf(down - atanf(tangents[eye][3])) < 1e-5f);
+    CHECK(fabsf(up - atanf(tangents[eye][3])) < 1e-5f);
+    CHECK(fabsf(down + atanf(tangents[eye][2])) < 1e-5f);
     float matrix[16], oracle[16];
     CHECK(lovrOpenVRFrameProjection(tangents[eye], .1f, 0.f, matrix));
     mat4_fov(oracle, left, right, up, down, .1f, 0.f);
@@ -506,7 +506,7 @@ static bool eventIntegration(void) {
   state.inputSerial = 4;
   state.haptics.hands[0].active = true;
   CHECK(!vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
-  CHECK(pollEvents() && !state.inputSerial && !state.haptics.hands[0].active);
+  CHECK(pollEvents() && state.inputSerial == 4 && state.frame.snapshot.head.valid && !state.haptics.hands[0].active);
   queuedEvent = EVREventType_VREvent_StandingZeroPoseReset;
   CHECK(pollEvents() && backendEvents[3].type == EVENT_RECENTER);
   CHECK(state.frame.updated && !state.frame.snapshot.head.valid && !state.inputSerial && !state.haptics.hands[0].active);

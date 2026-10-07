@@ -76,8 +76,9 @@ bool lovrHeadsetIsActive(void) { return false; }
 double lovrHeadsetGetDisplayTime(void) { return 0.; }
 
 static unsigned frameWaits, graphicsEvent, overlayPolls;
-static bool OPENVR_FNTABLE_CALLTYPE graphicsInputAvailable(void) { return true; }
-static bool OPENVR_FNTABLE_CALLTYPE graphicsPause(void) { return false; }
+static bool graphicsAvailable = true, graphicsPaused;
+static bool OPENVR_FNTABLE_CALLTYPE graphicsInputAvailable(void) { return graphicsAvailable; }
+static bool OPENVR_FNTABLE_CALLTYPE graphicsPause(void) { return graphicsPaused; }
 static bool OPENVR_FNTABLE_CALLTYPE graphicsOverlayPoll(VROverlayHandle_t handle, struct VREvent_t* event, uint32_t size) {
   (void) event; (void) size;
   if (!handle) abort();
@@ -458,9 +459,9 @@ static bool sceneCanvas(void) {
   vrState.events.inputFocus = false;
   actionsBefore = actionUpdates;
   vrState.haptics.hands[0].active = true;
-  CHECK(update() && actionUpdates == actionsBefore && !vrState.inputSerial && !vrState.haptics.hands[0].active);
+  CHECK(update() && actionUpdates == actionsBefore + 1 && vrState.inputSerial && !vrState.haptics.hands[0].active);
   vrState.events.inputFocus = true;
-  CHECK(update() && actionUpdates == actionsBefore + 1 && vrState.inputSerial);
+  CHECK(update() && actionUpdates == actionsBefore + 2 && vrState.inputSerial);
   unsigned pacedFrames = frameWaits;
   OpenVRFrameSnapshot* frame = &vrState.frame.snapshot;
   frame->origin = ETrackingUniverseOrigin_TrackingUniverseStanding;
@@ -492,12 +493,12 @@ static bool sceneCanvas(void) {
     CHECK(lovrPassGetProjection(pass, eye, observed) && !memcmp(expected, observed, sizeof(expected)));
     float oracle[16], view[16];
     const float* tangents = captured.eyes[eye].tangents;
-    mat4_fov(oracle, -atanf(tangents[0]), atanf(tangents[1]), -atanf(tangents[2]), atanf(tangents[3]), .01f, 0.f);
+    mat4_fov(oracle, -atanf(tangents[0]), atanf(tangents[1]), atanf(tangents[3]), -atanf(tangents[2]), .01f, 0.f);
     for (unsigned i = 0; i < 16; i++) CHECK(fabsf(observed[i] - oracle[i]) < 1e-5f);
     CHECK(lovrPassGetViewMatrix(pass, eye, view));
     for (unsigned corner = 0; corner < 4; corner++) {
       float x = tangents[corner & 1];
-      float y = -tangents[2 + (corner >> 1)];
+      float y = tangents[3 - (corner >> 1)];
       // A 90-degree yaw maps eye (x, y, -1) to world (tx - 1, 1.5 + y, 2 - x).
       float point[4] = { (eye ? .03f : -.03f) - 1.f, 1.5f + y, 2.f - x, 1.f };
       mat4_mulVec4(view, point);
@@ -737,6 +738,52 @@ static bool inputTransitions(void) {
       CHECK(actionUpdates == before + 1 && digitalReads == digitalBefore + 4 * OPENVR_INPUT_BUTTON_COUNT &&
         analogReads == analogBefore + 2 * OPENVR_INPUT_AXIS_COUNT && poseReads == poseBefore + 4);
     }
+  }
+  for (unsigned reason = 0; reason < 2; reason++) {
+    graphicsAvailable = reason != 0;
+    graphicsPaused = reason == 1;
+    CHECK(vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
+    unsigned before = actionUpdates, poseBefore = poseReads;
+    uint64_t serial = vrState.inputSerial;
+    CHECK(pollEvents() && !focused() && !vrState.haptics.hands[0].active && vrState.inputSerial == serial);
+    CHECK(!vrState.input.hands[0].buttons[0].bActive && !vrState.input.hands[0].touches[0].bActive &&
+      !vrState.input.hands[0].axes[0].bActive);
+    vrState.input.hands[0].buttons[0] = (InputDigitalActionData_t) { .bActive = true, .bState = true, .bChanged = true };
+    vrState.input.hands[0].touches[0] = vrState.input.hands[0].buttons[0];
+    vrState.input.hands[0].axes[0] = (InputAnalogActionData_t) { .bActive = true, .x = 1.f, .y = 1.f };
+    for (unsigned repeat = 0; repeat < 3; repeat++) {
+      bool value = true, changed = true;
+      float values[2] = { 9.f, 9.f }, p[3], q[4], linear[3], angular[3];
+      CHECK(pose(DEVICE_HAND_LEFT_GRIP, p, q) && q[3] == 1.f);
+      CHECK(pose(DEVICE_HAND_RIGHT_POINT, p, q) && q[3] == 1.f);
+      CHECK(velocity(DEVICE_HAND_LEFT, linear, angular));
+      CHECK(!down(DEVICE_HAND_LEFT, BUTTON_TRIGGER, &value, &changed) && !value && !changed);
+      CHECK(!touched(DEVICE_HAND_LEFT, BUTTON_TRIGGER, &value) && !value);
+      CHECK(!axis(DEVICE_HAND_LEFT, AXIS_THUMBSTICK, values) && values[0] == 0.f && values[1] == 0.f);
+      CHECK(!vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
+      CHECK(actionUpdates == before && poseReads == poseBefore);
+    }
+    failHaptic = true;
+    vrState.haptics.hands[0].active = true;
+    CHECK(update() && actionUpdates == before + 1 && poseReads == poseBefore + 4 &&
+      vrState.inputSerial == vrState.frame.snapshot.serial && !vrState.haptics.hands[0].active);
+    CHECK(!vrState.input.hands[0].buttons[0].bActive && !vrState.input.hands[0].axes[0].bActive);
+    float p[3], q[4];
+    CHECK(pose(DEVICE_HAND_LEFT, p, q));
+    CHECK(pollEvents() && pose(DEVICE_HAND_LEFT, p, q) && actionUpdates == before + 1 && poseReads == poseBefore + 4);
+    failHaptic = false;
+    failActions = true;
+    CHECK(!update() && inputCleared());
+    failActions = false;
+    CHECK(update() && pose(DEVICE_HAND_LEFT, p, q));
+    graphicsEvent = EVREventType_VREvent_StandingZeroPoseReset;
+    CHECK(pollEvents() && inputCleared() && !vrState.frame.snapshot.head.valid);
+    CHECK(update() && pose(DEVICE_HAND_LEFT, p, q));
+    graphicsAvailable = true; graphicsPaused = false;
+    CHECK(pollEvents() && focused());
+    bool value, changed;
+    CHECK(!down(DEVICE_HAND_LEFT, BUTTON_TRIGGER, &value, &changed));
+    CHECK(update());
   }
   failActions = true;
   CHECK(!update() && inputCleared());

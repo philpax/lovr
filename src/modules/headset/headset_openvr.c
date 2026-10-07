@@ -626,6 +626,17 @@ static bool visible(bool* main) {
 }
 static bool focused(void) { return active() && state.events.sampled && state.events.inputFocus; }
 static bool mounted(void) { return active() && state.events.sampled && state.events.activityKnown && state.events.active; }
+static bool interactionAllowed(void) {
+  return active() && state.inputReady && (!state.events.sampled || state.events.inputFocus);
+}
+static void clearInteraction(void) {
+  for (unsigned hand = 0; hand < 2; hand++) {
+    memset(state.input.hands[hand].buttons, 0, sizeof(state.input.hands[hand].buttons));
+    memset(state.input.hands[hand].touches, 0, sizeof(state.input.hands[hand].touches));
+    memset(state.input.hands[hand].axes, 0, sizeof(state.input.hands[hand].axes));
+  }
+  lovrOpenVRHapticsClear(&state.haptics);
+}
 static bool pollEvents(void) {
   if (!connected() || !state.inputReady) return false;
   if (!active()) return true;
@@ -637,11 +648,7 @@ static bool pollEvents(void) {
   OpenVREventEffects effects;
   lovrOpenVREventsUpdate(&state.events, &state.runtime, state.inputReady, (uint32_t) getpid(), handles, count, &effects);
   pushEventTransitions(&effects);
-  if (!state.events.inputFocus) {
-    lovrOpenVRInputClear(&state.input);
-    lovrOpenVRHapticsClear(&state.haptics);
-    state.inputSerial = 0;
-  }
+  if (!state.events.inputFocus) clearInteraction();
   bool ok = true;
   if ((state.config.seated && effects.invalidateSeated) || (!state.config.seated && effects.invalidateStanding)) {
     ok = projectionResult(invalidateFrame());
@@ -664,12 +671,13 @@ static bool update(void) {
   state.inputSerial = 0;
   lovrOpenVRInputClear(&state.input);
   if (result.status == OPENVR_FRAME_OK || result.status == OPENVR_FRAME_TIMEOUT) {
-    if (state.events.sampled && !state.events.inputFocus) {
-      lovrOpenVRHapticsClear(&state.haptics);
-      return true;
-    }
     EVRInputError error = lovrOpenVRInputUpdate(&state.input, state.frame.snapshot.origin, state.frame.snapshot.prediction);
     if (error != EVRInputError_VRInputError_None) return failInputUpdate("action snapshot", error);
+    if (!interactionAllowed()) {
+      clearInteraction();
+      state.inputSerial = state.frame.snapshot.serial;
+      return true;
+    }
     for (unsigned hand = 0; hand < 2; hand++) {
       if (!state.input.hands[hand].poses[0].bActive && !state.input.hands[hand].poses[1].bActive)
         lovrOpenVRHapticsCancel(&state.haptics, hand ? DEVICE_HAND_RIGHT : DEVICE_HAND_LEFT);
@@ -750,8 +758,8 @@ static bool viewAngles(uint32_t view, float* left, float* right, float* up, floa
   const float* tangents = state.frame.snapshot.eyes[view].tangents;
   *left = -atanf(tangents[0]);
   *right = atanf(tangents[1]);
-  *up = -atanf(tangents[2]);
-  *down = atanf(tangents[3]);
+  *up = atanf(tangents[3]);
+  *down = -atanf(tangents[2]);
   return true;
 }
 static void getClip(float* near, float* far) { *near = state.clipNear; *far = state.clipFar; }
@@ -774,16 +782,16 @@ static bool velocity(Device device, float* linear, float* angular) {
 }
 static bool down(Device device, DeviceButton button, bool* value, bool* changed) {
   *value = *changed = false;
-  return active() && state.inputSerial && lovrOpenVRInputIsDown(&state.input, device, button, value, changed);
+  return interactionAllowed() && state.inputSerial && lovrOpenVRInputIsDown(&state.input, device, button, value, changed);
 }
 static bool touched(Device device, DeviceButton button, bool* value) {
   *value = false;
-  return active() && state.inputSerial && lovrOpenVRInputIsTouched(&state.input, device, button, value);
+  return interactionAllowed() && state.inputSerial && lovrOpenVRInputIsTouched(&state.input, device, button, value);
 }
 static bool axis(Device device, DeviceAxis axis, float* value) {
   value[0] = 0.f;
   if (axis == AXIS_THUMBSTICK || axis == AXIS_TOUCHPAD) value[1] = 0.f;
-  return active() && state.inputSerial && lovrOpenVRInputGetAxis(&state.input, device, axis, value);
+  return interactionAllowed() && state.inputSerial && lovrOpenVRInputGetAxis(&state.input, device, axis, value);
 }
 static bool skeleton(Device device, float* poses, SkeletonSource* source) {
   (void) device; memset(poses, 0, HAND_JOINT_COUNT * 8 * sizeof(float)); *source = SOURCE_UNKNOWN; return false;
@@ -799,7 +807,7 @@ static Device hapticDevice(Device device) {
   }
 }
 static bool vibrate(Device device, float strength, float duration, float frequency) {
-  if (!active() || !state.inputReady || (state.events.sampled && !state.events.inputFocus)) return false;
+  if (!interactionAllowed()) return false;
   EVRInputError error = lovrOpenVRHapticsSchedule(&state.haptics, state.generation, hapticDevice(device),
     strength, duration, frequency, os_get_time(), hapticPulse, &state.input);
   lovrAssert(error == EVRInputError_VRInputError_None, "openvr: haptic schedule error %d", error);
