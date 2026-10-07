@@ -40,6 +40,7 @@ local conf = {
     shadercache = true
   },
   headset = {
+    backend = 'openxr',
     connect = true,
     start = true,
     debug = false,

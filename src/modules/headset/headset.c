@@ -1,8 +1,22 @@
+#include <stdio.h>
+#include <string.h>
+#include <threads.h>
 #include "headset/headset_ops.h"
 #include "headset/headset_layer.h"
 #include "util.h"
+#include "headset/headset_openxr.h"
 
-static const HeadsetOps* const ops = &lovrHeadsetOpenXROps;
+static const HeadsetOps* ops = &lovrHeadsetOpenXROps;
+static atomic_flag lifecycleLock = ATOMIC_FLAG_INIT;
+static unsigned clients;
+static enum { HEADSET_EMPTY, HEADSET_LIVE, HEADSET_CLEANUP } lifecycle;
+static HeadsetConfig config;
+static HeadsetConfig overlayConfig;
+static bool initialized;
+static bool xrInitialized;
+static bool vrInitialized;
+static bool frozen;
+static bool pending;
 static uint32_t sessionGeneration;
 
 uint32_t lovrHeadsetNextSessionGeneration(void) {
@@ -18,20 +32,158 @@ bool lovrLayerIsValid(Layer* layer) {
   return true;
 }
 
-bool lovrHeadsetInit(HeadsetConfig* config) {
-  return ops->HeadsetInit(config);
+static void lockLifecycle(void) {
+  while (atomic_flag_test_and_set(&lifecycleLock)) thrd_yield();
+}
+
+static bool cleanup(void) {
+  if (!lovrHeadsetBeforeGraphicsDestroy()) return false;
+#ifdef LOVR_ENABLE_OPENVR
+  if (vrInitialized) lovrHeadsetOpenVROps.HeadsetDestroy();
+#endif
+  if (xrInitialized) lovrHeadsetOpenXROps.HeadsetDestroy();
+  lovrFree(config.extensions);
+  memset(&config, 0, sizeof(config));
+  memset(&overlayConfig, 0, sizeof(overlayConfig));
+  initialized = xrInitialized = vrInitialized = pending = false;
+  ops = &lovrHeadsetOpenXROps;
+  lifecycle = HEADSET_EMPTY;
+  return true;
+}
+
+bool lovrHeadsetInit(HeadsetConfig* incoming) {
+  lovrAssert(incoming, "Headset config is null");
+  lockLifecycle();
+  if (lifecycle == HEADSET_CLEANUP && !cleanup()) {
+    char error[1024];
+    snprintf(error, sizeof(error), "%s", lovrGetError());
+    lovrFree(incoming->extensions);
+    lovrSetError("Headset initialization: cleanup is pending: %s", error);
+    atomic_flag_clear(&lifecycleLock);
+    return false;
+  }
+  if (lifecycle == HEADSET_LIVE) {
+    clients++;
+    lovrFree(incoming->extensions);
+    atomic_flag_clear(&lifecycleLock);
+    return true;
+  }
+  config = *incoming;
+  config.connect = incoming->connectConfigured ? incoming->connect : true;
+  overlayConfig = config;
+  overlayConfig.overlay = true;
+  ops = &lovrHeadsetOpenXROps;
+  initialized = true;
+  xrInitialized = true;
+  lifecycle = HEADSET_CLEANUP;
+  if (!ops->HeadsetInit(&config)) {
+    char error[1024];
+    snprintf(error, sizeof(error), "%s", lovrGetError());
+    cleanup();
+    lovrSetError("Headset initialization: %s", error);
+    atomic_flag_clear(&lifecycleLock);
+    return false;
+  }
+  clients = 1;
+  lifecycle = HEADSET_LIVE;
+  atomic_flag_clear(&lifecycleLock);
+  return true;
 }
 
 void lovrHeadsetDestroy(void) {
-  ops->HeadsetDestroy();
+  lockLifecycle();
+  if (lifecycle == HEADSET_LIVE && --clients == 0) lifecycle = HEADSET_CLEANUP;
+  if (lifecycle == HEADSET_CLEANUP && !cleanup()) {
+    lovrLog(LOG_ERROR, "XR", "Headset destruction deferred: %s", lovrGetError());
+  }
+  atomic_flag_clear(&lifecycleLock);
+}
+
+static void appendDiagnostic(char* errors, size_t size, const char* backend, const char* reason) {
+  size_t length = strlen(errors);
+  int written = snprintf(errors + length, size - length, "%s%s: %s", length ? "; " : "", backend, reason);
+  if (written < 0 || (size_t) written >= size - length) {
+    const char marker[] = " [diagnostics truncated]";
+    memcpy(errors + size - sizeof(marker), marker, sizeof(marker));
+  }
+}
+
+static bool tryXR(OpenXRConnectMode mode, char* errors, size_t size) {
+  ops = &lovrHeadsetOpenXROps;
+  OpenXRConnectResult result = lovrOpenXRConnect(mode);
+  if (result == OPENXR_CONNECT_SELECTED) return true;
+  pending = result == OPENXR_CONNECT_CLEANUP_PENDING;
+  appendDiagnostic(errors, size, mode == OPENXR_CONNECT_REQUIRE_OVERLAY ? "openxr overlay" : "openxr ordinary", lovrGetError());
+  return false;
+}
+
+static bool tryVR(char* errors, size_t size) {
+#ifdef LOVR_ENABLE_OPENVR
+  ops = &lovrHeadsetOpenVROps;
+  if (!vrInitialized) {
+    vrInitialized = true;
+    if (!ops->HeadsetInit(&overlayConfig)) goto fail;
+  }
+  if (ops->HeadsetConnect()) return true;
+fail:
+  appendDiagnostic(errors, size, "openvr", lovrGetError());
+  pending = !ops->HeadsetDisconnect();
+#else
+  appendDiagnostic(errors, size, "openvr", "backend is not built");
+#endif
+  return false;
 }
 
 bool lovrHeadsetConnect(void) {
-  return ops->HeadsetConnect();
+  if (lifecycle != HEADSET_LIVE) return false;
+  if (pending) {
+    if (!ops->HeadsetDisconnect()) return false;
+    pending = false;
+  }
+  if (frozen || ops->HeadsetIsConnected()) return ops->HeadsetIsConnected();
+  if (!config.connect) return false;
+  char errors[768] = { 0 };
+  if (config.backend == HEADSET_BACKEND_OPENVR) {
+    if (tryVR(errors, sizeof(errors))) return true;
+  } else if (config.backend == HEADSET_BACKEND_AUTO && config.overlay) {
+    if (tryXR(OPENXR_CONNECT_REQUIRE_OVERLAY, errors, sizeof(errors))) return true;
+    if (!pending && tryVR(errors, sizeof(errors))) return true;
+    if (!pending && tryXR(OPENXR_CONNECT_ORDINARY, errors, sizeof(errors))) return true;
+  } else {
+    if (tryXR(OPENXR_CONNECT_ORDINARY, errors, sizeof(errors))) return true;
+  }
+  if (!pending) ops = &lovrHeadsetOpenXROps;
+  lovrSetError("Headset selection: %s", errors);
+  lovrLog(LOG_WARN, "XR", "%s", lovrGetError());
+  return false;
+}
+
+bool lovrHeadsetPrepareGraphics(void) {
+  lovrAssert(!pending, "Headset cleanup is pending; graphics initialization is blocked");
+  frozen = true;
+  return true;
+}
+
+void lovrHeadsetGraphicsDestroyed(void) {
+  frozen = false;
+}
+
+bool lovrHeadsetRequiresPhysicalDevice(void) {
+#ifdef LOVR_ENABLE_OPENVR
+  return ops == &lovrHeadsetOpenVROps && ops->HeadsetIsConnected();
+#else
+  return false;
+#endif
+}
+
+void lovrHeadsetWillExit(void) {
+  if (initialized && ops->WillExit) ops->WillExit();
 }
 
 bool lovrHeadsetBeforeGraphicsDestroy(void) {
-  return ops->HeadsetDisconnect();
+  bool ok = ops->HeadsetDisconnect();
+  pending = !ok;
+  return ok;
 }
 
 bool lovrHeadsetIsConnected(void) {
@@ -158,8 +310,8 @@ void lovrHeadsetSetClipDistance(float clipNear, float clipFar) {
   ops->HeadsetSetClipDistance(clipNear, clipFar);
 }
 
-void lovrHeadsetGetBoundsDimensions(float* width, float* height) {
-  ops->HeadsetGetBoundsDimensions(width, height);
+void lovrHeadsetGetBoundsDimensions(float* width, float* depth) {
+  ops->HeadsetGetBoundsDimensions(width, depth);
 }
 
 bool lovrHeadsetGetHandPose(Side side, HandPose type, float* position, float* orientation) {

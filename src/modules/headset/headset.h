@@ -23,7 +23,16 @@ typedef enum {
   SKELETON_NATURAL
 } ControllerSkeletonMode;
 
+typedef enum {
+  HEADSET_BACKEND_OPENXR,
+  HEADSET_BACKEND_OPENVR,
+  HEADSET_BACKEND_AUTO
+} HeadsetBackend;
+
 typedef struct {
+  HeadsetBackend backend;
+  bool connect;
+  bool connectConfigured;
   float supersample;
   bool dynamicResolution;
   bool debug;
@@ -167,6 +176,7 @@ typedef enum {
 
 bool lovrHeadsetInit(HeadsetConfig* config);
 void lovrHeadsetDestroy(void);
+void lovrHeadsetWillExit(void);
 bool lovrHeadsetConnect(void);
 bool lovrHeadsetIsConnected(void);
 const char* lovrHeadsetGetName(void);

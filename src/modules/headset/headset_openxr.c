@@ -222,7 +222,7 @@ typedef struct {
   Pass* pass;
 } Simulator;
 
-static atomic_uint ref;
+
 
 static struct {
   HeadsetConfig config;
@@ -468,11 +468,6 @@ static bool openxrHeadsetGetDepthTexture(struct Texture** texture);
 // Entry
 
 static bool openxrHeadsetInit(HeadsetConfig* config) {
-  if (!lovrModuleAcquire(&ref)) {
-    lovrFree(config->extensions);
-    return true;
-  }
-
   state.config = *config;
 
   if (!state.simulator.initialized) {
@@ -490,23 +485,14 @@ static bool openxrHeadsetInit(HeadsetConfig* config) {
 
   openxrHeadsetSetClipDistance(.01f, 0.f);
 
-  lovrModuleReady(&ref);
   return true;
 }
 
 static void openxrHeadsetDestroy(void) {
-  unsigned previousRef = atomic_load(&ref);
-  if (!lovrModuleRelease(&ref)) return;
-  if (!openxrDisconnect()) {
-    if (atomic_load(&ref) != previousRef) atomic_fetch_add(&ref, 1);
-    lovrLog(LOG_ERROR, "XR", "Headset destruction deferred: %s", lovrGetError());
-    return;
-  }
-  lovrFree(state.config.extensions);
+  if (!openxrDisconnect()) return;
   Simulator simulator = state.simulator; // Keep simulator state between restarts, for convenience
   memset(&state, 0, sizeof(state));
   state.simulator = simulator;
-  lovrModuleReset(&ref);
 }
 
 static bool openxrHeadsetConnect(void) {

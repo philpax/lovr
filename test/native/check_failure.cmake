@@ -10,7 +10,18 @@ set(expected_names headset.dispatch.lifecycle headset.dispatch.features-and-laye
   headset.dispatch.false-and-null-forwarding headset.dispatch.vulkan-forwarding
   headset.dispatch.creator-and-generation headset.dispatch.unchecked.creator-and-generation
   headset.harness headset.harness.discovery headset.harness.failure-propagation)
+foreach(mode IN ITEMS native disabled emscripten)
+  foreach(case IN ITEMS yield restart actual-exit discovery)
+    list(APPEND expected_names headset.standalone.${mode}.${case})
+  endforeach()
+endforeach()
 if(GPU_TESTS_ENABLED)
+  list(APPEND expected_names headset.config)
+  foreach(mode IN ITEMS enabled disabled)
+    foreach(case IN ITEMS matrix connect-false legacy-connect-default cleanup-pending freeze gpu-lifetime ownership deferred-acquire failed-init-acquire actual-exit discovery)
+      list(APPEND expected_names headset.selection.${mode}.${case})
+    endforeach()
+  endforeach()
   list(APPEND expected_names headset.openxr.connect.no-overlay headset.openxr.connect.probe
     headset.openxr.connect.cleanup-retry headset.openxr.connect.failures
     headset.openxr.connect.bindings-retry headset.openxr.connect.discovery)
@@ -132,6 +143,9 @@ if(OPENVR_ENABLED)
     headset.openvr.assets.relative_artifact_rejected_after_cwd_change headset.openvr.assets.asset_error_context
     headset.openvr.assets.discovery
     headset.openvr.backend.discovery headset.openvr.backend.graphics-discovery
+    headset.openvr.diagnostic.connected-oracle headset.openvr.diagnostic.identity
+    headset.openvr.diagnostic.exhaustion headset.openvr.diagnostic.texture-counters
+    headset.openvr.diagnostic.discovery
     headset.openvr.assets.staged.shared headset.openvr.assets.staged.relative-rejected
     headset.openvr.assets.staged.standalone)
 endif()

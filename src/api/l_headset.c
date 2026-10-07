@@ -8,6 +8,13 @@
 #include "util.h"
 #include <stdlib.h>
 
+StringEntry lovrHeadsetBackend[] = {
+  [HEADSET_BACKEND_OPENXR] = ENTRY("openxr"),
+  [HEADSET_BACKEND_OPENVR] = ENTRY("openvr"),
+  [HEADSET_BACKEND_AUTO] = ENTRY("auto"),
+  { 0 }
+};
+
 StringEntry lovrControllerSkeletonMode[] = {
   [SKELETON_NONE] = ENTRY("none"),
   [SKELETON_CONTROLLER] = ENTRY("controller"),
@@ -1189,6 +1196,9 @@ int luaopen_lovr_headset(lua_State* L) {
   luax_registertype(L, Layer);
 
   HeadsetConfig config = {
+    .backend = HEADSET_BACKEND_OPENXR,
+    .connect = true,
+    .connectConfigured = true,
     .supersample = 1.f,
     .dynamicResolution = true,
     .seated = false,
@@ -1206,6 +1216,14 @@ int luaopen_lovr_headset(lua_State* L) {
   if (lua_istable(L, -1)) {
     lua_getfield(L, -1, "headset");
     if (lua_istable(L, -1)) {
+      lua_getfield(L, -1, "backend");
+      config.backend = luax_checkenum(L, -1, HeadsetBackend, "openxr");
+      lua_pop(L, 1);
+
+      lua_getfield(L, -1, "connect");
+      config.connect = lua_isnil(L, -1) ? true : lua_toboolean(L, -1);
+      lua_pop(L, 1);
+
       lua_getfield(L, -1, "supersample");
       if (lua_type(L, -1) == LUA_TBOOLEAN) {
         config.supersample = lua_toboolean(L, -1) ? 2.f : 1.f;
@@ -1267,8 +1285,9 @@ int luaopen_lovr_headset(lua_State* L) {
             lua_call(L, 2, 1);
             size_t length;
             const char* string = lua_tolstring(L, -1, &length);
-            char* extensions = lovrMalloc(length);
+            char* extensions = lovrMalloc(length + 1);
             memcpy(extensions, string, length);
+            extensions[length] = '\0';
             config.extensionCount = count;
             config.extensions = extensions;
           }

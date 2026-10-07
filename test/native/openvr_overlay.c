@@ -4,7 +4,7 @@
 
 static struct {
   unsigned int calls, fail, destroys, hides, shows;
-  bool destroyFail, valid;
+  bool destroyFail, valid, createErrorHandle, createZero;
   char trace[32];
   VROverlayFlags flags[4];
   bool enabled[4];
@@ -27,7 +27,7 @@ static EVROverlayError record(char call, VROverlayHandle_t handle) {
 static EVROverlayError OPENVR_FNTABLE_CALLTYPE create(char* key, char* name, VROverlayHandle_t* handle) {
   fake.valid &= strcmp(key, "lunette.panel.17") == 0 && strcmp(name, "panel fixture") == 0;
   EVROverlayError error = record('C', 73);
-  if (!error) *handle = 73;
+  if ((!error || fake.createErrorHandle) && !fake.createZero) *handle = 73;
   return error;
 }
 
@@ -189,6 +189,29 @@ static bool stereoCurve(void) {
 }
 
 static bool failures(void) {
+  for (unsigned retry = 0; retry < 2; retry++) {
+    reset();
+    fake.fail = 1;
+    fake.createErrorHandle = true;
+    fake.destroyFail = retry != 0;
+    OpenVRPanel panel = { 0 };
+    OpenVRPanelConfig c = config();
+    OpenVRPanelResult r = lovrOpenVRPanelCreate(&panel, &api, "lunette.panel.17", "panel fixture", &c);
+    CHECK(r.error == EVROverlayError_VROverlayError_RequestFailed && fake.destroys == 1);
+    CHECK(panel.handle == (retry ? 73u : 0u));
+    CHECK(r.cleanupError == (retry ? EVROverlayError_VROverlayError_PermissionDenied : EVROverlayError_VROverlayError_None));
+    if (retry) {
+      CHECK(panel.api == &api);
+      reset();
+      CHECK(lovrOpenVRPanelDestroy(&panel).status == OPENVR_PANEL_OK && !panel.handle);
+    }
+  }
+  reset();
+  fake.createZero = true;
+  OpenVRPanel zero = { 0 };
+  OpenVRPanelConfig zeroConfig = config();
+  CHECK(lovrOpenVRPanelCreate(&zero, &api, "lunette.panel.17", "panel fixture", &zeroConfig).error == EVROverlayError_VROverlayError_InvalidHandle);
+  CHECK(!zero.handle && !zero.api && !fake.destroys);
   for (unsigned int fail = 1; fail <= 15; fail++) {
     reset();
     fake.fail = fail;

@@ -3,6 +3,7 @@
 #include "headset/headset.h"
 
 typedef struct HeadsetOps {
+  void (*WillExit)(void);
   bool (*HeadsetInit)(HeadsetConfig* config);
   void (*HeadsetDestroy)(void);
   bool (*HeadsetConnect)(void);
@@ -87,6 +88,13 @@ typedef struct HeadsetOps {
 } HeadsetOps;
 
 extern const HeadsetOps lovrHeadsetOpenXROps;
+#ifdef LOVR_ENABLE_OPENVR
+extern const HeadsetOps lovrHeadsetOpenVROps;
+#endif
+
+bool lovrHeadsetPrepareGraphics(void);
+void lovrHeadsetGraphicsDestroyed(void);
+bool lovrHeadsetRequiresPhysicalDevice(void);
 
 bool lovrHeadsetBeforeGraphicsDestroy(void);
 uint32_t lovrHeadsetNextSessionGeneration(void);

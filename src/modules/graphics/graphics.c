@@ -7,7 +7,7 @@
 #include "data/rasterizer.h"
 #include "event/event.h"
 #include "headset/headset.h"
-#if defined(LOVR_VK) && !defined(LOVR_DISABLE_HEADSET)
+#if !defined(LOVR_DISABLE_HEADSET)
 #include "headset/headset_ops.h"
 #endif
 #include "math/math.h"
@@ -824,6 +824,13 @@ bool lovrGraphicsInit(GraphicsConfig* config) {
     return true;
   }
 
+#if !defined(LOVR_DISABLE_HEADSET)
+  if (!lovrHeadsetPrepareGraphics()) {
+    lovrModuleReset(&ref);
+    return false;
+  }
+#endif
+
   gpu_config gpu = {
     .debug = config->debug,
     .lowPower = config->lowPower,
@@ -842,6 +849,7 @@ bool lovrGraphicsInit(GraphicsConfig* config) {
     .vk.cacheSize = config->cacheSize,
 #endif
 #if defined(LOVR_VK) && !defined(LOVR_DISABLE_HEADSET)
+    .vk.requirePhysicalDevice = lovrHeadsetRequiresPhysicalDevice(),
     .vk.getPhysicalDevice = lovrHeadsetIsConnected() ? lovrHeadsetGetVulkanPhysicalDevice : NULL,
     .vk.createInstance = lovrHeadsetIsConnected() ? lovrHeadsetCreateVulkanInstance : NULL,
     .vk.createDevice = lovrHeadsetIsConnected() ? lovrHeadsetCreateVulkanDevice : NULL,
@@ -860,6 +868,9 @@ bool lovrGraphicsInit(GraphicsConfig* config) {
 #endif
     lovrSetError("Failed to initialize GPU: %s", gpu_get_error());
     if (gpu_destroy()) {
+#ifndef LOVR_DISABLE_HEADSET
+      lovrHeadsetGraphicsDestroyed();
+#endif
       lovrFree(thread.stack.memory);
       memset(&thread, 0, sizeof(thread));
       lovrModuleReset(&ref);
@@ -1109,7 +1120,11 @@ void lovrGraphicsDestroy(void) {
     layout = next;
   }
   if (state.lockReady) mtx_destroy(&state.lock);
-  gpu_destroy();
+  if (gpu_destroy()) {
+#ifndef LOVR_DISABLE_HEADSET
+    lovrHeadsetGraphicsDestroyed();
+#endif
+  }
 #ifdef LOVR_USE_GLSLANG
   if (state.glslang) glslang_finalize_process();
 #endif

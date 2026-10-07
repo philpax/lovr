@@ -56,6 +56,7 @@ bool gpu_texture_init(gpu_texture* object, gpu_texture_info* info) {
 }
 bool gpu_begin_teardown(void) { abort(); }
 bool gpu_destroy(void) { abort(); }
+void lovrHeadsetGraphicsDestroyed(void) { abort(); }
 void gpu_layout_destroy(gpu_layout* object) { abort(); }
 bool gpu_wait_idle(void) { return true; }
 bool gpu_prepare_teardown(void) { return true; }

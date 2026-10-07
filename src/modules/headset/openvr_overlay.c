@@ -92,9 +92,15 @@ OpenVRPanelResult lovrOpenVRPanelCreate(OpenVRPanel* panel, struct VR_IVROverlay
   }
   VROverlayHandle_t handle = 0;
   status = runtimeResult("CreateOverlay", api->CreateOverlay((char*) key, (char*) name, &handle));
-  if (status.status != OPENVR_PANEL_OK) return status;
+  if (handle) *panel = (OpenVRPanel) { .api = api, .handle = handle };
+  if (status.status != OPENVR_PANEL_OK) {
+    if (handle) {
+      OpenVRPanelResult cleanup = lovrOpenVRPanelDestroy(panel);
+      status.cleanupError = cleanup.error != EVROverlayError_VROverlayError_None ? cleanup.error : cleanup.cleanupError;
+    }
+    return status;
+  }
   if (!handle) return result(OPENVR_PANEL_RUNTIME_ERROR, "CreateOverlay", EVROverlayError_VROverlayError_InvalidHandle);
-  *panel = (OpenVRPanel) { .api = api, .handle = handle };
   status = lovrOpenVRPanelConfigure(panel, config);
   if (status.status != OPENVR_PANEL_OK) {
     OpenVRPanelResult cleanup = lovrOpenVRPanelDestroy(panel);

@@ -514,6 +514,57 @@ static bool eventIntegration(void) {
   CHECK(!quitAcks);
   return true;
 }
+static bool actualExit(void) {
+  begin();
+  struct VR_IVRSystem_FnTable system = { .PollNextEvent = backendPoll, .AcknowledgeQuit_Exiting = backendAck };
+  state.runtime.system = &system;
+  quitAcks = 0;
+  lovrHeadsetOpenVROps.WillExit();
+  CHECK(!quitAcks);
+  struct VREvent_t foreign = { .eventType = EVREventType_VREvent_ProcessQuit,
+    .data.process.pid = (uint32_t) getpid() + 1 };
+  bool dashboardActivated = false;
+  OpenVREventEffects effects = { 0 };
+  eventsReduce(&state.events, &foreign, (uint32_t) getpid(), &dashboardActivated, &effects);
+  CHECK(!state.events.quitRequested);
+  lovrHeadsetOpenVROps.WillExit();
+  CHECK(!quitAcks);
+  queuedEvent = EVREventType_VREvent_Quit;
+  CHECK(pollEvents() && state.events.quitRequested && !quitAcks);
+  CHECK(pollEvents() && !quitAcks);
+  stop();
+  CHECK(!quitAcks);
+  CHECK(start() && !quitAcks);
+  CHECK(disconnect() && !quitAcks);
+  lovrHeadsetOpenVROps.WillExit();
+  CHECK(!quitAcks);
+  destroy();
+  begin();
+  state.runtime.system = &system;
+  lovrHeadsetOpenVROps.WillExit();
+  CHECK(!quitAcks);
+  queuedEvent = EVREventType_VREvent_ProcessQuit;
+  CHECK(pollEvents() && state.events.quitRequested && !quitAcks);
+  lovrHeadsetOpenVROps.WillExit();
+  lovrHeadsetOpenVROps.WillExit();
+  CHECK(quitAcks == 1);
+  CHECK(disconnect() && quitAcks == 1);
+  destroy();
+  CHECK(quitAcks == 1);
+  begin();
+  state.runtime.system = &system;
+  lovrHeadsetOpenVROps.WillExit();
+  CHECK(quitAcks == 1);
+  queuedEvent = EVREventType_VREvent_Quit;
+  CHECK(pollEvents() && state.events.quitRequested && quitAcks == 1);
+  lovrHeadsetOpenVROps.WillExit();
+  lovrHeadsetOpenVROps.WillExit();
+  CHECK(quitAcks == 2);
+  destroy();
+  CHECK(quitAcks == 2);
+  return true;
+}
+
 static bool invalidScale(void) {
   float scales[] = { 0.f, -1.f, NAN, INFINITY };
   for (unsigned i = 0; i < sizeof(scales) / sizeof(scales[0]); i++) {
@@ -545,7 +596,8 @@ int main(int argc, char** argv) {
     { "openvr.backend.invalid-scale", invalidScale },
     { "openvr.backend.connection-transaction", connectionTransaction },
     { "openvr.backend.snapshot-routes", snapshotRoutes },
-    { "openvr.backend.events-recenter", eventIntegration }
+    { "openvr.backend.events-recenter", eventIntegration },
+    { "openvr.backend.actual-exit", actualExit }
   };
   return nativeRunTests(argc, argv, tests, sizeof(tests) / sizeof(tests[0]));
 }

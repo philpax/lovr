@@ -255,7 +255,7 @@ void os_poll_events(double timeout) {
       event.any = xcb_wait_for_event(state.connection);
     } else {
       xcb_flush(state.connection);
-      struct pollfd fd = { xcb_get_file_descriptor(state.connection), POLLIN };
+      struct pollfd fd = { .fd = xcb_get_file_descriptor(state.connection), .events = POLLIN };
       poll(&fd, 1, (int) (timeout * 1000.));
       event.any = xcb_poll_for_event(state.connection);
     }

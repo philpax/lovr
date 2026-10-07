@@ -179,6 +179,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance instance, const 
 static void reset(void) {
   memset(&state, 0, sizeof(state));
   state.config.supersample = 1.f;
+  state.config.connect = true;
   overlay = extended = failDestroy = failActionDestroy = failSystem = failCreate = failEnumeration = failBlend = false;
   instances = destructions = sessions = suggestions = generation = handBindings = 0;
   withoutMicrogestures = gaze = enabledOverlay = enabledGaze = populatedProperties = false;

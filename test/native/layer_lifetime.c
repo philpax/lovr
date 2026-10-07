@@ -251,6 +251,14 @@ static XrResult XRAPI_CALL fakeDestroyActionSet(XrActionSet actionSet) {
 static bool disconnectOwnership(void) {
   disconnect();
   disconnect();
+  HeadsetConfig config = { .supersample = 1.f, .connect = true, .extensionCount = 1 };
+  config.extensions = lovrMalloc(sizeof("XR_test_extension"));
+  strcpy(config.extensions, "XR_test_extension");
+  CHECK(lovrHeadsetInit(&config));
+  HeadsetConfig repeated = { .extensions = lovrMalloc(sizeof("XR_other_extension")), .extensionCount = 1 };
+  strcpy(repeated.extensions, "XR_other_extension");
+  CHECK(lovrHeadsetInit(&repeated));
+  CHECK(state.config.extensions == config.extensions);
   beginSession();
   state.instance = (XrInstance) (uintptr_t) 1;
   state.actionSet = (XrActionSet) (uintptr_t) 1;
@@ -267,14 +275,16 @@ static bool disconnectOwnership(void) {
   CHECK(lovrLayerIsValid(layer));
   CHECK(destroyed == before && invalidations == invalidationsBefore && flushes == flushesBefore);
   CHECK(instancesDestroyed == 0 && actionSetsDestroyed == 0);
-  CHECK(lovrModuleAcquire(&ref));
-  lovrModuleReady(&ref);
-  unsigned savedRef = atomic_load(&ref);
-  openxrHeadsetDestroy();
-  CHECK(atomic_load(&ref) == savedRef);
+  lovrHeadsetDestroy();
+  CHECK(state.session && state.instance && state.actionSet && lovrLayerIsValid(layer));
+  lovrHeadsetDestroy();
+  CHECK(destroyed == before && invalidations == invalidationsBefore && flushes == flushesBefore);
+  CHECK(instancesDestroyed == 0 && actionSetsDestroyed == 0);
+  CHECK(!strcmp(state.config.extensions, "XR_test_extension"));
   CHECK(state.session && state.instance && state.actionSet && lovrLayerIsValid(layer));
   prepareSucceeds = true;
-  disconnect();
+  lovrHeadsetDestroy();
+  CHECK(!state.config.extensions);
   CHECK(destroyed == before + 1);
   CHECK(instancesDestroyed == 1 && actionSetsDestroyed == 1);
   CHECK(!state.session && !state.instance && !state.actionSet);
@@ -289,8 +299,13 @@ static bool disconnectOwnership(void) {
   CHECK(instancesDestroyed == 2);
   disconnect();
   CHECK(instancesDestroyed == 2);
-  openxrHeadsetDestroy();
-  CHECK(atomic_load(&ref) == 0);
+  lovrHeadsetDestroy();
+  CHECK(instancesDestroyed == 2);
+  HeadsetConfig restarted = { .supersample = 1.f, .connect = true };
+  CHECK(lovrHeadsetInit(&restarted));
+  CHECK(state.config.connect && state.config.supersample == 1.f);
+  lovrHeadsetDestroy();
+  CHECK(!state.config.connect && !state.config.extensions);
   return true;
 }
 

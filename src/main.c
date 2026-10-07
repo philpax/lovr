@@ -2,6 +2,9 @@
 #include "core/os.h"
 #include "util.h"
 #include "boot.lua.h"
+#if !defined(LOVR_DISABLE_HEADSET) && !defined(EMSCRIPTEN)
+#include "headset/headset_ops.h"
+#endif
 #include <lualib.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -19,6 +22,9 @@ bool step(void* arg) {
     return false;
   } else {
     int status = lua_tointeger(T, 1);
+#if !defined(LOVR_DISABLE_HEADSET) && !defined(EMSCRIPTEN)
+    lovrHeadsetWillExit();
+#endif
     lovrSetLogCallback(NULL, NULL);
     luax_close(T);
     os_destroy();

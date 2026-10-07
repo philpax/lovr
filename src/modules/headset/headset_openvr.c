@@ -1,5 +1,8 @@
 #include "headset/headset_layer.h"
 #include "headset/openvr_runtime.h"
+#ifdef LOVR_ENABLE_OPENVR_DIAGNOSTIC
+#include "headset/openvr_diagnostic.h"
+#endif
 #include "headset/openvr_assets.h"
 #include "headset/openvr_input.h"
 #include "headset/openvr_events.h"
@@ -73,6 +76,102 @@ static struct {
   float clipNear;
   float clipFar;
 } state;
+
+#ifdef LOVR_ENABLE_OPENVR_DIAGNOSTIC
+static struct {
+  struct VR_IVROverlay_FnTable original;
+  struct VR_IVROverlay_FnTable delegated;
+  VROverlayHandle_t handles[MAX_LAYERS];
+  uint32_t liveOverlayHandles;
+  const char* trackingError;
+  uint64_t retiredOverlayHandles;
+  uint64_t setOverlayTextureCalls;
+  uint64_t setOverlayTextureSuccesses;
+  EVROverlayError lastSetOverlayTextureError;
+} diagnostic;
+
+bool lovrOpenVRDiagnosticObserve(OpenVRDiagnosticObservation* observation) {
+  lovrAssert(observation, "openvr diagnostic: observation is null");
+  lovrAssert(!diagnostic.trackingError, "openvr diagnostic: %s", diagnostic.trackingError);
+  bool connected = state.runtime.initialized;
+  lovrAssert(!connected || (state.runtime.applications && state.runtime.applications->GetCurrentSceneProcessId),
+    "openvr diagnostic: connected runtime has no applications scene oracle");
+  *observation = (OpenVRDiagnosticObservation) {
+    .connected = connected,
+    .cleanupPending = state.stopping,
+    .generation = state.generation,
+    .currentScenePID = connected ? state.runtime.applications->GetCurrentSceneProcessId() : 0,
+    .liveOverlayHandles = diagnostic.liveOverlayHandles,
+    .retiredOverlayHandles = diagnostic.retiredOverlayHandles,
+    .setOverlayTextureCalls = diagnostic.setOverlayTextureCalls,
+    .setOverlayTextureSuccesses = diagnostic.setOverlayTextureSuccesses,
+    .lastSetOverlayTextureError = diagnostic.lastSetOverlayTextureError
+  };
+  return true;
+}
+
+static EVROverlayError OPENVR_FNTABLE_CALLTYPE diagnosticCreateOverlay(char* key, char* name, VROverlayHandle_t* handle) {
+  EVROverlayError error = diagnostic.original.CreateOverlay(key, name, handle);
+  if (handle && *handle) {
+    uint32_t slot = MAX_LAYERS;
+    for (uint32_t i = 0; i < MAX_LAYERS; i++) {
+      if (diagnostic.handles[i] == *handle) {
+        diagnostic.trackingError = "duplicate created overlay handle";
+        return error;
+      }
+      if (!diagnostic.handles[i] && slot == MAX_LAYERS) slot = i;
+    }
+    if (slot == MAX_LAYERS) {
+      diagnostic.trackingError = "overlay handle tracker exhausted";
+    } else {
+      diagnostic.handles[slot] = *handle;
+      diagnostic.liveOverlayHandles++;
+    }
+  } else if (error == EVROverlayError_VROverlayError_None) {
+    diagnostic.trackingError = "successful overlay creation returned no handle";
+  }
+  return error;
+}
+
+static EVROverlayError OPENVR_FNTABLE_CALLTYPE diagnosticDestroyOverlay(VROverlayHandle_t handle) {
+  EVROverlayError error = diagnostic.original.DestroyOverlay(handle);
+  uint32_t slot = MAX_LAYERS;
+  for (uint32_t i = 0; i < MAX_LAYERS; i++) {
+    if (handle && diagnostic.handles[i] == handle) { slot = i; break; }
+  }
+  if (slot == MAX_LAYERS) {
+    diagnostic.trackingError = "destruction of an untracked overlay handle";
+  } else if (error == EVROverlayError_VROverlayError_None) {
+    diagnostic.handles[slot] = 0;
+    diagnostic.liveOverlayHandles--;
+    if (diagnostic.retiredOverlayHandles == UINT64_MAX) diagnostic.trackingError = "retired overlay counter overflow";
+    else diagnostic.retiredOverlayHandles++;
+  }
+  return error;
+}
+
+static EVROverlayError OPENVR_FNTABLE_CALLTYPE diagnosticSetOverlayTexture(VROverlayHandle_t handle, struct Texture_t* texture) {
+  if (diagnostic.setOverlayTextureCalls == UINT64_MAX) diagnostic.trackingError = "overlay texture call counter overflow";
+  else diagnostic.setOverlayTextureCalls++;
+  EVROverlayError error = diagnostic.original.SetOverlayTexture(handle, texture);
+  diagnostic.lastSetOverlayTextureError = error;
+  if (error == EVROverlayError_VROverlayError_None) {
+    if (diagnostic.setOverlayTextureSuccesses == UINT64_MAX) diagnostic.trackingError = "overlay texture success counter overflow";
+    else diagnostic.setOverlayTextureSuccesses++;
+  }
+  return error;
+}
+
+static void diagnosticDelegateOverlay(void) {
+  if (state.runtime.overlay == &diagnostic.delegated) return;
+  diagnostic.original = *state.runtime.overlay;
+  diagnostic.delegated = diagnostic.original;
+  diagnostic.delegated.CreateOverlay = diagnosticCreateOverlay;
+  diagnostic.delegated.DestroyOverlay = diagnosticDestroyOverlay;
+  diagnostic.delegated.SetOverlayTexture = diagnosticSetOverlayTexture;
+  state.runtime.overlay = &diagnostic.delegated;
+}
+#endif
 
 static bool panelResult(OpenVRPanelResult result) {
   if (result.status == OPENVR_PANEL_OK) return true;
@@ -267,6 +366,9 @@ static bool connect(void) {
     return false;
   }
   state.inputReady = true;
+#ifdef LOVR_ENABLE_OPENVR_DIAGNOSTIC
+  diagnosticDelegateOverlay();
+#endif
   return true;
 }
 
@@ -899,7 +1001,12 @@ static double displayTime(void) { return state.frame.snapshot.displayTime; }
 static double displayPeriod(void) { return state.frame.snapshot.displayPeriod; }
 static double deltaTime(void) { return state.frame.snapshot.delta; }
 
+static void willExit(void) {
+  lovrOpenVREventsAcknowledgeExit(&state.events, &state.runtime);
+}
+
 const HeadsetOps lovrHeadsetOpenVROps = {
+  .WillExit = willExit,
   .HeadsetInit = init,
   .HeadsetDestroy = destroy,
   .HeadsetConnect = connect,

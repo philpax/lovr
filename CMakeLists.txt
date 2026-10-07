@@ -44,6 +44,7 @@ option(LOVR_SYSTEM_OPENXR "Use the system-provided OpenXR" OFF)
 option(LOVR_SANITIZE "Enable Address Sanitizer" OFF)
 option(LOVR_PROFILE "Enable Tracy integration" OFF)
 option(LOVR_BUILD_HEADSET_TESTS "Build hardware-free native headset tests" OFF)
+option(LOVR_BUILD_OPENVR_COEXISTENCE "Build the opt-in OpenVR runtime coexistence driver" OFF)
 
 # Packaging
 option(LOVR_BUILD_EXE "Build an executable (or an apk on Android)" ON)
@@ -474,30 +475,33 @@ if(LOVR_ENABLE_OPENVR)
     src/modules/headset/headset_openvr.c
   )
   target_link_libraries(lovr ${CMAKE_DL_LIBS})
-  target_compile_definitions(lovr PRIVATE LOVR_OPENVR_SHARED=$<BOOL:${LOVR_BUILD_SHARED}>)
+  target_compile_definitions(lovr PRIVATE LOVR_ENABLE_OPENVR LOVR_OPENVR_SHARED=$<BOOL:${LOVR_BUILD_SHARED}>)
   set(openvr_assets
     ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/actions.json
     ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_vive_controller.json
     ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_knuckles.json
     ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_oculus_touch.json
   )
-  if(LOVR_BUILD_SHARED)
-    set(openvr_asset_directory "${CMAKE_CURRENT_BINARY_DIR}/lovr-openvr")
-  else()
-    set(openvr_asset_directory "${CMAKE_BINARY_DIR}/bin/lovr-openvr")
-  endif()
-  if(CMAKE_CONFIGURATION_TYPES)
-    get_filename_component(openvr_asset_parent "${openvr_asset_directory}" DIRECTORY)
-    set(openvr_asset_directory "${openvr_asset_parent}/$<CONFIG>/lovr-openvr")
-  endif()
-  add_custom_target(lovr_openvr_assets
+  set(openvr_asset_directory "$<TARGET_FILE_DIR:lovr>/lovr-openvr")
+  add_custom_command(TARGET lovr POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${openvr_asset_directory}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${openvr_assets} "${openvr_asset_directory}"
-    DEPENDS ${openvr_assets}
     VERBATIM
   )
-  add_dependencies(lovr lovr_openvr_assets)
+  set_property(TARGET lovr APPEND PROPERTY LINK_DEPENDS ${openvr_assets})
   target_link_options(lovr PRIVATE "LINKER:--exclude-libs,liblovr_openvr_loader.a")
+endif()
+
+if(LOVR_BUILD_OPENVR_COEXISTENCE)
+  if(NOT LOVR_ENABLE_OPENVR OR NOT LOVR_BUILD_SHARED OR NOT LOVR_BUILD_WITH_SYMBOLS OR NOT LOVR_ENABLE_GRAPHICS OR NOT LOVR_ENABLE_HEADSET OR NOT LOVR_ENABLE_EVENT)
+    message(FATAL_ERROR "OpenVR coexistence requires an OpenVR-enabled, symbol-exporting shared library with graphics, headset, and event modules")
+  endif()
+  target_compile_definitions(lovr PRIVATE LOVR_ENABLE_OPENVR_DIAGNOSTIC)
+  add_executable(lovr_openvr_coexistence test/runtime/openvr_coexistence.c)
+  target_compile_definitions(lovr_openvr_coexistence PRIVATE LOVR_ENABLE_OPENVR_DIAGNOSTIC)
+  target_include_directories(lovr_openvr_coexistence PRIVATE src src/modules)
+  target_link_libraries(lovr_openvr_coexistence PRIVATE lovr m)
+  set_target_properties(lovr_openvr_coexistence PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime-tests")
 endif()
 
 target_link_libraries(lovr

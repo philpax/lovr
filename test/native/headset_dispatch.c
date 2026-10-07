@@ -1,13 +1,18 @@
 #include "headset/headset_ops.h"
+#include "headset/headset_openxr.h"
 #include "headset/headset_layer.h"
 #include "test.h"
+#include "util.h"
 #include <stdlib.h>
 
 struct Layer { LayerHeader header; int token; };
 
 static struct {
   HeadsetConfig* config;
+  HeadsetConfig snapshot;
   bool result;
+  OpenXRConnectResult connectResult;
+  OpenXRConnectMode connectMode;
   bool connected;
   bool active;
   char calls[32];
@@ -43,6 +48,7 @@ static void record(char call) {
 static bool fakeHeadsetInit(HeadsetConfig* config) {
   record('i');
   fake.config = config;
+  fake.snapshot = *config;
   return fake.result;
 }
 
@@ -59,10 +65,15 @@ static bool fakeHeadsetDisconnect(void) {
   return true;
 }
 
-static bool fakeHeadsetConnect(void) {
+OpenXRConnectResult lovrOpenXRConnect(OpenXRConnectMode mode) {
   record('c');
-  fake.connected = fake.result;
-  return fake.result;
+  fake.connectMode = mode;
+  fake.connected = fake.connectResult == OPENXR_CONNECT_SELECTED;
+  return fake.connectResult;
+}
+
+static bool fakeHeadsetConnect(void) {
+  return lovrOpenXRConnect(OPENXR_CONNECT_ORDINARY) == OPENXR_CONNECT_SELECTED;
 }
 
 static bool fakeHeadsetIsConnected(void) { return fake.connected; }
@@ -308,26 +319,51 @@ const HeadsetOps lovrHeadsetOpenXROps = {
 };
 
 static bool lifecycle(void) {
+  lovrHeadsetWillExit();
+  CHECK(lovrHeadsetOpenXROps.WillExit == NULL);
   memset(&fake, 0, sizeof(fake));
-  char extensions[] = "XR_test_extension";
   HeadsetConfig config = {
     .supersample = 1.25f, .dynamicResolution = true, .debug = true, .seated = true,
     .mask = true, .stencil = true, .antialias = true, .submitDepth = true,
     .overlay = true, .overlayOrder = 42, .controllerSkeleton = SKELETON_NATURAL,
-    .extensionCount = 1, .extensions = extensions
+    .connect = true, .backend = HEADSET_BACKEND_OPENXR, .extensionCount = 1
   };
-  unsigned char original[sizeof(config)];
-  memcpy(original, &config, sizeof(config));
+  config.extensions = lovrMalloc(sizeof("XR_test_extension"));
+  strcpy(config.extensions, "XR_test_extension");
+  HeadsetConfig original = config;
   CHECK(!lovrHeadsetIsConnected());
   CHECK(!lovrHeadsetInit(&config));
-  CHECK(fake.config == &config);
+  CHECK(fake.config != &config);
+  CHECK(!memcmp(&fake.snapshot, &original, sizeof(config)));
+  lovrHeadsetDestroy();
+  CHECK(fake.callCount == 3 && !memcmp(fake.calls, "ixd", 3));
+
+  memset(&fake, 0, sizeof(fake));
+  config.extensions = lovrMalloc(sizeof("XR_test_extension"));
+  strcpy(config.extensions, "XR_test_extension");
+  original = config;
+  fake.result = true;
+  fake.connectResult = OPENXR_CONNECT_UNAVAILABLE_CLEANED;
+  CHECK(lovrHeadsetInit(&config));
+  lovrHeadsetWillExit();
+  CHECK(fake.callCount == 1);
+  CHECK(fake.config != &config);
+  CHECK(!memcmp(fake.config, &original, sizeof(config)));
+  HeadsetConfig* canonical = fake.config;
+  config.supersample = 2.f;
+  config.connect = false;
+  HeadsetConfig repeated = { .extensions = lovrMalloc(sizeof("XR_other_extension")), .extensionCount = 1 };
+  strcpy(repeated.extensions, "XR_other_extension");
+  CHECK(lovrHeadsetInit(&repeated));
+  CHECK(fake.callCount == 1 && fake.config == canonical);
+  CHECK(!memcmp(canonical, &original, sizeof(original)));
+  CHECK(!lovrHeadsetConnect());
+  CHECK(fake.connectMode == OPENXR_CONNECT_ORDINARY);
+  CHECK(!lovrHeadsetIsConnected());
+  fake.connectResult = OPENXR_CONNECT_CLEANUP_PENDING;
   CHECK(!lovrHeadsetConnect());
   CHECK(!lovrHeadsetIsConnected());
-  CHECK(!lovrHeadsetStart());
-  CHECK(!lovrHeadsetIsActive());
-  fake.result = true;
-  CHECK(lovrHeadsetInit(&config));
-  CHECK(fake.config == &config);
+  fake.connectResult = OPENXR_CONNECT_SELECTED;
   CHECK(lovrHeadsetConnect());
   CHECK(lovrHeadsetIsConnected());
   CHECK(lovrHeadsetStart());
@@ -336,18 +372,20 @@ static bool lifecycle(void) {
   CHECK(!lovrHeadsetIsActive());
   CHECK(lovrHeadsetIsConnected());
   lovrHeadsetDestroy();
-  CHECK(!lovrHeadsetIsConnected());
-  CHECK(!lovrHeadsetIsActive());
-  CHECK(fake.callCount == 8);
-  CHECK(memcmp(fake.calls, "icaicasd", 8) == 0);
-  CHECK(memcmp(&config, original, sizeof(config)) == 0);
-  CHECK(config.extensions == extensions);
-  CHECK(strcmp(extensions, "XR_test_extension") == 0);
+  CHECK(lovrHeadsetIsConnected());
+  CHECK(fake.callCount == 7 && !memcmp(fake.calls, "iccxcas", 7));
+  CHECK(!strcmp(canonical->extensions, "XR_test_extension"));
+  lovrHeadsetDestroy();
+  lovrHeadsetWillExit();
+  CHECK(!lovrHeadsetIsConnected() && !lovrHeadsetIsActive());
+  CHECK(fake.callCount == 9 && !memcmp(fake.calls, "iccxcasxd", 9));
+  lovrHeadsetDestroy();
+  CHECK(fake.callCount == 9);
   fake.connected = true;
   fake.active = true;
-  lovrHeadsetBeforeGraphicsDestroy();
+  CHECK(lovrHeadsetBeforeGraphicsDestroy());
   CHECK(!fake.connected && !fake.active);
-  CHECK(fake.callCount == 9 && fake.calls[8] == 'x');
+  CHECK(fake.callCount == 10 && fake.calls[9] == 'x');
   return true;
 }
 
