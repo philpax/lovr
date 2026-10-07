@@ -750,8 +750,8 @@ static bool viewAngles(uint32_t view, float* left, float* right, float* up, floa
   const float* tangents = state.frame.snapshot.eyes[view].tangents;
   *left = -atanf(tangents[0]);
   *right = atanf(tangents[1]);
-  *up = atanf(tangents[3]);
-  *down = -atanf(tangents[2]);
+  *up = -atanf(tangents[2]);
+  *down = atanf(tangents[3]);
   return true;
 }
 static void getClip(float* near, float* far) { *near = state.clipNear; *far = state.clipFar; }

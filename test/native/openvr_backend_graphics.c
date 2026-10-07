@@ -467,13 +467,13 @@ static bool sceneCanvas(void) {
   frame->width = 64; frame->height = 32; frame->head.valid = true;
   for (unsigned eye = 0; eye < 2; eye++) {
     frame->eyes[eye].pose.valid = true;
-    mat4_identity(frame->eyes[eye].pose.matrix);
-    frame->eyes[eye].pose.matrix[12] = eye ? .03f : -.03f;
-    frame->eyes[eye].pose.matrix[13] = 1.5f;
-    frame->eyes[eye].transform = (HmdMatrix34_t) { .m = { { 1, 0, 0, eye ? .03f : -.03f }, { 0, 1, 0, 1.5f }, { 0, 0, 1, 0 } } };
+    float eyeToWorld[16] = { 0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, eye ? .03f : -.03f, 1.5f, 2, 1 };
+    memcpy(frame->eyes[eye].pose.matrix, eyeToWorld, sizeof(eyeToWorld));
+    frame->eyes[eye].transform = (HmdMatrix34_t) { .m = { { 0, 0, 1, eye ? .03f : -.03f }, { 0, 1, 0, 1.5f }, { -1, 0, 0, 2 } } };
     float tangents[4] = { eye ? -.9f : -1.1f, eye ? 1.2f : .8f, -1.3f, .7f };
     memcpy(frame->eyes[eye].tangents, tangents, sizeof(tangents));
   }
+  OpenVRFrameSnapshot captured = *frame;
   Pass* pass;
   CHECK(scenePass(&pass) && pass && pass->views == 2 && pass->canvas.samples == 4);
   CHECK(pass->tempDepth && pass->tempColor[0] && pass->canvas.depthFormat == FORMAT_D24S8);
@@ -490,6 +490,22 @@ static bool sceneCanvas(void) {
     CHECK(lovrPassGetViewMatrix(pass, eye, observed) && !memcmp(expected, observed, sizeof(expected)));
     CHECK(lovrOpenVRFrameProjection(frame->eyes[eye].tangents, .01f, 0.f, expected));
     CHECK(lovrPassGetProjection(pass, eye, observed) && !memcmp(expected, observed, sizeof(expected)));
+    float oracle[16], view[16];
+    const float* tangents = captured.eyes[eye].tangents;
+    mat4_fov(oracle, -atanf(tangents[0]), atanf(tangents[1]), -atanf(tangents[2]), atanf(tangents[3]), .01f, 0.f);
+    for (unsigned i = 0; i < 16; i++) CHECK(fabsf(observed[i] - oracle[i]) < 1e-5f);
+    CHECK(lovrPassGetViewMatrix(pass, eye, view));
+    for (unsigned corner = 0; corner < 4; corner++) {
+      float x = tangents[corner & 1];
+      float y = -tangents[2 + (corner >> 1)];
+      // A 90-degree yaw maps eye (x, y, -1) to world (tx - 1, 1.5 + y, 2 - x).
+      float point[4] = { (eye ? .03f : -.03f) - 1.f, 1.5f + y, 2.f - x, 1.f };
+      mat4_mulVec4(view, point);
+      CHECK(fabsf(point[0] - x) < 1e-5f && fabsf(point[1] - y) < 1e-5f && fabsf(point[2] + 1.f) < 1e-5f);
+      mat4_mulVec4(observed, point);
+      CHECK(fabsf(point[0] / point[3] - ((corner & 1) ? 1.f : -1.f)) < 1e-5f);
+      CHECK(fabsf(point[1] / point[3] - ((corner >> 1) ? 1.f : -1.f)) < 1e-5f);
+    }
   }
   Pass* repeated;
   CHECK(scenePass(&repeated) && repeated == pass && frameWaits == pacedFrames);
@@ -498,6 +514,10 @@ static bool sceneCanvas(void) {
   uint32_t width, height; dimensions(&width, &height);
   CHECK(width == sceneWidth && height == sceneHeight && pass->width == sceneWidth && pass->height == sceneHeight && frameWaits == pacedFrames && displayTime() > 0.);
   frame->eyes[0].transform.m[0][3] = 99.f;
+  mat4_identity(frame->eyes[0].pose.matrix);
+  frame->eyes[0].tangents[2] = -.2f;
+  CHECK(scenePass(&repeated) && repeated == pass);
+  CHECK(!memcmp(vrState.scene.render.eyes, captured.eyes, sizeof(captured.eyes)));
   state.lockReady = mtx_init(&state.lock, mtx_plain) == thrd_success;
   CHECK(state.lockReady);
   state.initialized = true;
@@ -512,7 +532,11 @@ static bool sceneCanvas(void) {
   CHECK(panelCopies == 1 && panelSubmissions == 1);
   CHECK(sceneCopies == 2 && sceneSubmissions == 2 && sceneCopiedEyes[0] == 0 && sceneCopiedEyes[1] == 1);
   CHECK(sceneCopiedOutputs[0] != sceneCopiedOutputs[1]);
-  CHECK(submittedPoses[0].m[0][3] == -.03f && submittedPoses[1].m[0][3] == .03f);
+  for (unsigned eye = 0; eye < 2; eye++) {
+    CHECK(!memcmp(&submittedPoses[eye], &captured.eyes[eye].transform, sizeof(submittedPoses[eye])));
+    CHECK(submittedFrusta[eye].fTop == captured.eyes[eye].tangents[2] &&
+      submittedFrusta[eye].fBottom == captured.eyes[eye].tangents[3]);
+  }
   CHECK(submittedFrusta[0].fLeft == -1.1f && submittedFrusta[1].fRight == 1.2f);
   CHECK(vrState.scene.projection.visible[0] && vrState.scene.projection.visible[1]);
   CHECK(panelVisible);

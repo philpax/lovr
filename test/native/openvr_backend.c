@@ -458,6 +458,27 @@ static bool snapshotRoutes(void) {
   CHECK(disconnect());
   return true;
 }
+static bool asymmetricViewAngles(void) {
+  begin();
+  state.frame.updated = true;
+  float tangents[2][4] = { { -1.2f, .8f, -.7f, 1.1f }, { -.9f, 1.3f, -1.2f, .6f } };
+  for (unsigned eye = 0; eye < 2; eye++) {
+    state.frame.snapshot.eyes[eye].pose.valid = true;
+    memcpy(state.frame.snapshot.eyes[eye].tangents, tangents[eye], sizeof(tangents[eye]));
+    float left, right, up, down;
+    CHECK(lovrHeadsetOpenVROps.HeadsetGetViewAngles(eye, &left, &right, &up, &down));
+    CHECK(fabsf(left + atanf(tangents[eye][0])) < 1e-5f);
+    CHECK(fabsf(right - atanf(tangents[eye][1])) < 1e-5f);
+    CHECK(fabsf(up + atanf(tangents[eye][2])) < 1e-5f);
+    CHECK(fabsf(down - atanf(tangents[eye][3])) < 1e-5f);
+    float matrix[16], oracle[16];
+    CHECK(lovrOpenVRFrameProjection(tangents[eye], .1f, 0.f, matrix));
+    mat4_fov(oracle, left, right, up, down, .1f, 0.f);
+    for (unsigned i = 0; i < 16; i++) CHECK(fabsf(matrix[i] - oracle[i]) < 1e-5f);
+  }
+  CHECK(disconnect());
+  return true;
+}
 static unsigned eventPolls;
 static uint32_t queuedEvent;
 static bool OPENVR_FNTABLE_CALLTYPE backendPoll(struct VREvent_t* event, uint32_t size) {
@@ -596,6 +617,7 @@ int main(int argc, char** argv) {
     { "openvr.backend.invalid-scale", invalidScale },
     { "openvr.backend.connection-transaction", connectionTransaction },
     { "openvr.backend.snapshot-routes", snapshotRoutes },
+    { "openvr.backend.asymmetric-view-angles", asymmetricViewAngles },
     { "openvr.backend.events-recenter", eventIntegration },
     { "openvr.backend.actual-exit", actualExit }
   };
