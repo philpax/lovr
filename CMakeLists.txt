@@ -625,7 +625,7 @@ if(LOVR_ENABLE_HEADSET)
   )
 
   if(NOT EMSCRIPTEN)
-    target_sources(lovr PRIVATE src/modules/headset/headset.c)
+    target_sources(lovr PRIVATE src/modules/headset/headset.c src/modules/headset/headset_openxr.c)
   endif()
 else()
   target_compile_definitions(lovr PRIVATE LOVR_DISABLE_HEADSET)

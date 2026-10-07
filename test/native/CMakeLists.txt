@@ -19,6 +19,12 @@ function(configure_native_test target)
   add_dependencies(headset_native_tests ${target})
 endfunction()
 
+add_executable(headset_dispatch_regression headset_dispatch.c ../../src/modules/headset/headset.c)
+target_include_directories(headset_dispatch_regression PRIVATE ../../src/modules)
+configure_native_test(headset_dispatch_regression)
+add_test(NAME headset.dispatch-regression COMMAND headset_dispatch_regression)
+set_tests_properties(headset.dispatch-regression PROPERTIES LABELS headset)
+
 add_executable(headset_harness_selftest harness_selftest.c)
 configure_native_test(headset_harness_selftest)
 add_test(NAME headset.harness COMMAND headset_harness_selftest)

@@ -6,7 +6,7 @@ if(NOT DEFINED CTEST_EXECUTABLE OR NOT DEFINED TEST_DIRECTORY OR NOT DEFINED OPE
   message(FATAL_ERROR "CTEST_EXECUTABLE, TEST_DIRECTORY, and OPENVR_ENABLED are required")
 endif()
 
-set(expected_names headset.harness headset.harness.discovery headset.harness.failure-propagation)
+set(expected_names headset.dispatch-regression headset.harness headset.harness.discovery headset.harness.failure-propagation)
 if(OPENVR_ENABLED)
   list(APPEND expected_names
     headset.openvr.overlay-sdk-fntables headset.openvr.idempotent-lifecycle headset.openvr.exclusive-owner
