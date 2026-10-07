@@ -338,11 +338,6 @@ if(LOVR_ENABLE_OPENVR)
   set(LOVR_OPENVR lovr_openvr_runtime)
 endif()
 
-if(LOVR_BUILD_HEADSET_TESTS)
-  enable_testing()
-  add_subdirectory(test/native headset-tests)
-endif()
-
 # pthreads
 if(LOVR_ENABLE_THREAD AND NOT (WIN32 OR EMSCRIPTEN))
   set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -363,12 +358,84 @@ if(LOVR_BUILD_EXE)
   list(APPEND LOVR_SRC src/main.c)
 endif()
 
+if(LOVR_ENABLE_GRAPHICS OR (LOVR_BUILD_HEADSET_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+  function(compile_shaders)
+    if(LOVR_USE_GLSLANG AND ENABLE_GLSLANG_BINARIES AND NOT ANDROID)
+      set(GLSLANG_VALIDATOR $<TARGET_FILE:glslang-standalone>)
+    elseif(Vulkan_GLSLANG_VALIDATOR_EXECUTABLE)
+      set(GLSLANG_VALIDATOR "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}")
+    else()
+      find_program(GLSLANG_VALIDATOR glslang)
+      if(NOT GLSLANG_VALIDATOR)
+        message(FATAL_ERROR "Need glslangValidator installed or LOVR_USE_GLSLANG enabled")
+      endif()
+    endif()
+    set(LOVR_GLSL "${PROJECT_SOURCE_DIR}/etc/shaders/lovr.glsl")
+    file(GLOB shader_files "etc/shaders/*.${ARGV0}")
+    foreach(shader_file ${shader_files})
+      string(REGEX MATCH "([^\/]+)\\.${ARGV0}$" shader ${shader_file})
+      string(REPLACE ".${ARGV0}" "" shader ${shader})
+      add_custom_command(
+        OUTPUT ${shader_file}.h
+        DEPENDS ${shader_file} ${LOVR_GLSL}
+        COMMAND
+          ${GLSLANG_VALIDATOR}
+          --quiet
+          $<$<CONFIG:Debug>:-gVS>
+          --target-env vulkan1.1
+          $<$<BOOL:${LOVR_USE_WEBGPU}>:-DWEBGPU>
+          --vn lovr_shader_${shader}_${ARGV0}
+          -o ${shader_file}.h
+          ${shader_file}
+      )
+      list(APPEND LOVR_SHADER_HEADERS ${shader_file}.h)
+    endforeach()
+    set(LOVR_SHADER_HEADERS ${LOVR_SHADER_HEADERS} PARENT_SCOPE)
+  endfunction()
+
+  compile_shaders("vert")
+  compile_shaders("frag")
+  compile_shaders("comp")
+  add_custom_target(lovr_shader_headers DEPENDS ${LOVR_SHADER_HEADERS})
+endif()
+
+# Resources
+file(GLOB LOVR_RESOURCES "etc/*.ttf" "etc/*.lua" "etc/shaders/*.glsl" "src/api/l_math.lua")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${LOVR_RESOURCES})
+foreach(path ${LOVR_RESOURCES})
+
+  # Turn the absolute path into a C variable like etc_boot_lua
+  file(RELATIVE_PATH identifier ${PROJECT_SOURCE_DIR} ${path})
+  string(MAKE_C_IDENTIFIER ${identifier} identifier)
+
+  # Read the file and turn the bytes into comma-separated hex literals
+  file(READ ${path} data HEX)
+  string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," data ${data})
+
+  # Generate the output filename by adding .h to the input filename
+  string(CONCAT output ${path} ".h")
+
+  # Write some xxd-compatible C code!
+  file(WRITE ${output} "const unsigned char ${identifier}[] = {${data}};\nconst unsigned int ${identifier}_len = sizeof(${identifier});\n")
+  list(APPEND LOVR_RESOURCE_HEADERS ${output})
+endforeach()
+add_custom_target(lovr_resource_headers DEPENDS ${LOVR_RESOURCE_HEADERS})
+
+if(LOVR_BUILD_HEADSET_TESTS)
+  enable_testing()
+  add_subdirectory(test/native headset-tests)
+endif()
+
 if(LOVR_BUILD_SHARED)
   add_library(lovr SHARED ${LOVR_SRC})
 elseif(LOVR_BUILD_EXE)
   add_executable(lovr ${LOVR_SRC})
 else()
   return()
+endif()
+
+if(LOVR_ENABLE_GRAPHICS)
+  add_dependencies(lovr lovr_shader_headers)
 endif()
 
 if(NOT LOVR_BUILD_EXE)
@@ -578,45 +645,10 @@ if(LOVR_ENABLE_GRAPHICS)
     target_sources(lovr PRIVATE src/core/gpu_web.c)
   endif()
 
-  function(compile_shaders)
-    if(LOVR_USE_GLSLANG AND ENABLE_GLSLANG_BINARIES AND NOT ANDROID)
-      set(GLSLANG_VALIDATOR $<TARGET_FILE:glslang-standalone>)
-    elseif(Vulkan_GLSLANG_VALIDATOR_EXECUTABLE)
-      set(GLSLANG_VALIDATOR "${Vulkan_GLSLANG_VALIDATOR_EXECUTABLE}")
-    else()
-      find_program(GLSLANG_VALIDATOR glslang)
-      if(NOT GLSLANG_VALIDATOR)
-        message(FATAL_ERROR "Need glslangValidator installed or LOVR_USE_GLSLANG enabled")
-      endif()
-    endif()
-    set(LOVR_GLSL "${PROJECT_SOURCE_DIR}/etc/shaders/lovr.glsl")
-    file(GLOB shader_files "etc/shaders/*.${ARGV0}")
-    foreach(shader_file ${shader_files})
-      string(REGEX MATCH "([^\/]+)\\.${ARGV0}$" shader ${shader_file})
-      string(REPLACE ".${ARGV0}" "" shader ${shader})
-      add_custom_command(
-        OUTPUT ${shader_file}.h
-        DEPENDS ${shader_file} ${LOVR_GLSL}
-        COMMAND
-          ${GLSLANG_VALIDATOR}
-          --quiet
-          $<$<CONFIG:Debug>:-gVS>
-          --target-env vulkan1.1
-          $<$<BOOL:${LOVR_USE_WEBGPU}>:-DWEBGPU>
-          --vn lovr_shader_${shader}_${ARGV0}
-          -o ${shader_file}.h
-          ${shader_file}
-      )
-      target_sources(lovr PRIVATE ${shader_file}.h)
-    endforeach()
-  endfunction()
-
-  compile_shaders("vert")
-  compile_shaders("frag")
-  compile_shaders("comp")
 else()
   target_compile_definitions(lovr PRIVATE LOVR_DISABLE_GRAPHICS)
 endif()
+
 
 if(LOVR_ENABLE_HEADSET)
   target_sources(lovr PRIVATE
@@ -736,26 +768,6 @@ if(NOT EMSCRIPTEN)
     endif()
   endforeach()
 endif()
-
-# Resources
-file(GLOB LOVR_RESOURCES "etc/*.ttf" "etc/*.lua" "etc/shaders/*.glsl" "src/api/l_math.lua")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${LOVR_RESOURCES})
-foreach(path ${LOVR_RESOURCES})
-
-  # Turn the absolute path into a C variable like etc_boot_lua
-  file(RELATIVE_PATH identifier ${PROJECT_SOURCE_DIR} ${path})
-  string(MAKE_C_IDENTIFIER ${identifier} identifier)
-
-  # Read the file and turn the bytes into comma-separated hex literals
-  file(READ ${path} data HEX)
-  string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," data ${data})
-
-  # Generate the output filename by adding .h to the input filename
-  string(CONCAT output ${path} ".h")
-
-  # Write some xxd-compatible C code!
-  file(WRITE ${output} "const unsigned char ${identifier}[] = {${data}};\nconst unsigned int ${identifier}_len = sizeof(${identifier});\n")
-endforeach()
 
 if(NOT ANDROID)
   add_custom_command(TARGET lovr POST_BUILD

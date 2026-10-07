@@ -1649,7 +1649,7 @@ bool gpu_init(gpu_config* config) {
   return !!state.device;
 }
 
-void gpu_destroy(void) {
+bool gpu_destroy(void) {
   for (uint32_t i = 0; i < 2; i++) {
     wgpu_object_destroy(state.blit.bindGroupLayout[i]);
     wgpu_object_destroy(state.blit.pipelineLayout[i]);
@@ -1667,6 +1667,7 @@ void gpu_destroy(void) {
   wgpu_object_destroy(state.blit.shader);
   wgpu_object_destroy(state.device);
   memset(&state, 0, sizeof(state));
+  return true;
 }
 
 char* gpu_get_error(void) {
@@ -1738,6 +1739,18 @@ bool gpu_wait_tick(uint32_t tick) {
 
 bool gpu_wait_idle(void) {
   return true; // TODO unsupported?
+}
+
+bool gpu_prepare_teardown(void) {
+  return gpu_wait_idle();
+}
+
+bool gpu_begin_teardown(void) {
+  return gpu_prepare_teardown();
+}
+
+void gpu_flush_deferred_after_idle(void) {
+  gpu_wait_idle();
 }
 
 // Helpers

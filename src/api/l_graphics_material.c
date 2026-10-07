@@ -1,5 +1,6 @@
 #include "api.h"
 #include "graphics/graphics.h"
+#include "graphics/graphics_session.h"
 #include "util.h"
 
 Material* luax_optmaterial(lua_State* L, int index) {
@@ -8,11 +9,20 @@ Material* luax_optmaterial(lua_State* L, int index) {
   } else {
     Texture* texture = luax_totype(L, index, Texture);
     if (texture) {
+      if (!lovrTextureIsValid(texture)) {
+        (void) luaL_error(L, "Texture belongs to an invalidated headset session");
+        return NULL;
+      }
       Material* material = lovrTextureToMaterial(texture);
       luax_assert(L, material);
       return material;
     } else {
-      return luax_checktype(L, index, Material);
+      Material* material = luax_checktype(L, index, Material);
+      if (!lovrMaterialIsValid(material)) {
+        (void) luaL_error(L, "Material belongs to an invalidated headset session");
+        return NULL;
+      }
+      return material;
     }
   }
 }
@@ -73,6 +83,7 @@ static int l_lovrMaterialSetQuad(lua_State* L) {
   quad[1] = luax_checkfloat(L, 3);
   quad[2] = luax_checkfloat(L, 4);
   quad[3] = luax_checkfloat(L, 5);
+  luax_assert(L, lovrMaterialIsValid(material));
   lovrMaterialSetQuad(material, quad);
   return 0;
 }
@@ -170,6 +181,7 @@ static int l_lovrMaterialIsDoubleSided(lua_State* L) {
 static int l_lovrMaterialSetDoubleSided(lua_State* L) {
   Material* material = luax_checktype(L, 1, Material);
   bool doubleSided = lua_toboolean(L, 2);
+  luax_assert(L, lovrMaterialIsValid(material));
   lovrMaterialSetDoubleSided(material, doubleSided);
   return 0;
 }

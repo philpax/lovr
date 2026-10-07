@@ -285,6 +285,9 @@ static struct {
   gpu_allocator allocators[GPU_MEMORY_COUNT];
   uint8_t allocatorLookup[GPU_MEMORY_COUNT];
   mtx_t allocatorLock;
+  bool allocatorLockReady;
+  bool morgueLockReady;
+  bool teardownPrepared;
   gpu_memory memory[1024];
   _Atomic(gpu_thread_state*) threads;
   _Atomic(gpu_upload*) uploads;
@@ -850,6 +853,7 @@ bool gpu_texture_init_view(gpu_texture* texture, gpu_texture_view_info* info) {
     case GPU_TEXTURE_3D: type = VK_IMAGE_VIEW_TYPE_3D; break;
     case GPU_TEXTURE_CUBE: type = texture->layers > 6 ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY : VK_IMAGE_VIEW_TYPE_CUBE; break;
     case GPU_TEXTURE_ARRAY: type = VK_IMAGE_VIEW_TYPE_2D_ARRAY; break;
+    default: error("Invalid texture view type"); return false;
   }
 
   VkImageViewUsageCreateInfo viewUsage = {
@@ -3012,6 +3016,10 @@ void gpu_import_release(gpu_stream* stream, gpu_texture* texture, uint32_t newLa
 // Entry
 
 bool gpu_init(gpu_config* config) {
+  if (state.config.fnAlloc) {
+    error("GPU cleanup pending");
+    return false;
+  }
   state.config = *config;
 
   // Load
@@ -3658,18 +3666,19 @@ bool gpu_init(gpu_config* config) {
 
       VkImage image;
       VkMemoryRequirements requirements;
-      vkCreateImage(state.device, &info, NULL, &image);
+      VK(vkCreateImage(state.device, &info, NULL, &image), "vkCreateImage") goto fail;
       vkGetImageMemoryRequirements(state.device, image, &requirements);
       vkDestroyImage(state.device, image, NULL);
 
-      uint16_t memoryType, memoryFlags;
+      uint16_t memoryType = UINT16_MAX;
       for (uint32_t j = 0; j < memory.memoryProperties.memoryTypeCount; j++) {
         if ((requirements.memoryTypeBits & (1 << j)) && (memoryTypes[j].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
-          memoryFlags = memoryTypes[j].propertyFlags;
           memoryType = j;
           break;
         }
       }
+
+      ASSERT(memoryType != UINT16_MAX, "No compatible device-local texture memory type") goto fail;
 
       // Unlike buffers, we try to merge our texture allocators since all the textures have similar
       // lifetime characteristics, and using less allocators greatly reduces memory usage due to the
@@ -3686,7 +3695,7 @@ bool gpu_init(gpu_config* config) {
 
       if (!merged) {
         uint32_t index = allocatorCount++;
-        state.allocators[index].memoryFlags = memoryFlags;
+        state.allocators[index].memoryFlags = memoryTypes[memoryType].propertyFlags;
         state.allocators[index].heapIndex = memoryTypes[memoryType].heapIndex;
         state.allocators[index].fallbackMemoryType = memoryType;
         state.allocators[index].memoryType = memoryType;
@@ -3694,7 +3703,8 @@ bool gpu_init(gpu_config* config) {
       }
     }
 
-    mtx_init(&state.allocatorLock, mtx_plain);
+    state.allocatorLockReady = mtx_init(&state.allocatorLock, mtx_plain) == thrd_success;
+    ASSERT(state.allocatorLockReady, "Failed to initialize allocator mutex") goto fail;
   }
 
   // Semaphore
@@ -3754,7 +3764,8 @@ bool gpu_init(gpu_config* config) {
     }
   }
 
-  mtx_init(&state.morgue.lock, mtx_plain);
+  state.morgueLockReady = mtx_init(&state.morgue.lock, mtx_plain) == thrd_success;
+  ASSERT(state.morgueLockReady, "Failed to initialize morgue mutex") goto fail;
 
   return true;
 fail:
@@ -3762,9 +3773,9 @@ fail:
   return false;
 }
 
-void gpu_destroy(void) {
-  if (state.device) vkDeviceWaitIdle(state.device);
-  expunge(UINT64_MAX);
+bool gpu_destroy(void) {
+  if (!gpu_begin_teardown()) return false;
+  if (state.morgueLockReady) expunge(UINT64_MAX);
   for (gpu_thread_state* t = state.threads, *next; t; t = next) {
     for (gpu_stream_pool* pool = t->streamPools, *next; pool; pool = next) {
       vkDestroyCommandPool(state.device, pool->handle, NULL);
@@ -3782,8 +3793,8 @@ void gpu_destroy(void) {
     next = victim->next;
     state.config.fnFree(victim);
   }
-  mtx_destroy(&state.morgue.lock);
-  mtx_destroy(&state.allocatorLock);
+  if (state.morgueLockReady) mtx_destroy(&state.morgue.lock);
+  if (state.allocatorLockReady) mtx_destroy(&state.allocatorLock);
   if (state.pipelineCache) vkDestroyPipelineCache(state.device, state.pipelineCache, NULL);
   if (state.semaphore) vkDestroySemaphore(state.device, state.semaphore, NULL);
   for (uint32_t i = 0; i < COUNTOF(state.memory); i++) {
@@ -3807,6 +3818,7 @@ void gpu_destroy(void) {
   if (state.library) dlclose(state.library);
 #endif
   memset(&state, 0, sizeof(state));
+  return true;
 }
 
 char* gpu_get_error(void) {
@@ -4009,8 +4021,49 @@ bool gpu_wait_tick(uint32_t tick) {
 }
 
 bool gpu_wait_idle(void) {
+  if (!state.device) return true;
   VK(vkDeviceWaitIdle(state.device), "vkDeviceWaitIdle") return false;
+  gpu_flush_deferred_after_idle();
   return true;
+}
+
+bool gpu_prepare_teardown(void) {
+  if (state.teardownPrepared) {
+    gpu_flush_deferred_after_idle();
+    return true;
+  }
+  if (state.device) {
+    VkResult result = vkDeviceWaitIdle(state.device);
+    if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) {
+      vkerror(result, "vkDeviceWaitIdle");
+      return false;
+    }
+  }
+  gpu_flush_deferred_after_idle();
+  return true;
+}
+
+bool gpu_begin_teardown(void) {
+  if (!state.teardownPrepared && state.device) {
+    VkResult result = vkDeviceWaitIdle(state.device);
+    if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) {
+      vkerror(result, "vkDeviceWaitIdle");
+      return false;
+    }
+  }
+  state.teardownPrepared = true;
+  bool (*beforeDestroy)(void) = state.config.vk.beforeDestroy;
+  state.config.vk.beforeDestroy = NULL;
+  if (beforeDestroy && !beforeDestroy()) {
+    state.config.vk.beforeDestroy = beforeDestroy;
+    error("Runtime disconnect incomplete");
+    return false;
+  }
+  return true;
+}
+
+void gpu_flush_deferred_after_idle(void) {
+  if (state.morgueLockReady) expunge(UINT64_MAX);
 }
 
 uintptr_t gpu_vk_get_instance(void) {

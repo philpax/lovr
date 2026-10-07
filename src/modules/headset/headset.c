@@ -1,6 +1,22 @@
 #include "headset/headset_ops.h"
+#include "headset/headset_layer.h"
+#include "util.h"
 
 static const HeadsetOps* const ops = &lovrHeadsetOpenXROps;
+static uint32_t sessionGeneration;
+
+uint32_t lovrHeadsetNextSessionGeneration(void) {
+  lovrAssert(sessionGeneration < UINT32_MAX, "Headset session generation exhausted");
+  return ++sessionGeneration;
+}
+
+bool lovrLayerIsValid(Layer* layer) {
+  lovrAssert(layer, "Layer is null");
+  LayerHeader* header = (LayerHeader*) layer;
+  lovrAssert(header->creator == ops && header->generation != 0 &&
+    header->generation == ops->HeadsetGetSessionGeneration(), "Layer belongs to an inactive headset session");
+  return true;
+}
 
 bool lovrHeadsetInit(HeadsetConfig* config) {
   return ops->HeadsetInit(config);
@@ -12,6 +28,10 @@ void lovrHeadsetDestroy(void) {
 
 bool lovrHeadsetConnect(void) {
   return ops->HeadsetConnect();
+}
+
+bool lovrHeadsetBeforeGraphicsDestroy(void) {
+  return ops->HeadsetDisconnect();
 }
 
 bool lovrHeadsetIsConnected(void) {
@@ -235,63 +255,63 @@ Layer* lovrLayerCreate(const LayerInfo* info) {
 }
 
 void lovrLayerDestroy(void* ref) {
-  ops->LayerDestroy(ref);
+  lovrLayerGetCreator(ref)->LayerDestroy(ref);
 }
 
 Device lovrLayerGetOrigin(Layer* layer) {
-  return ops->LayerGetOrigin(layer);
+  return lovrLayerGetCreator(layer)->LayerGetOrigin(layer);
 }
 
 void lovrLayerSetOrigin(Layer* layer, Device device) {
-  ops->LayerSetOrigin(layer, device);
+  lovrLayerGetCreator(layer)->LayerSetOrigin(layer, device);
 }
 
 void lovrLayerGetPose(Layer* layer, float* position, float* orientation) {
-  ops->LayerGetPose(layer, position, orientation);
+  lovrLayerGetCreator(layer)->LayerGetPose(layer, position, orientation);
 }
 
 void lovrLayerSetPose(Layer* layer, float* position, float* orientation) {
-  ops->LayerSetPose(layer, position, orientation);
+  lovrLayerGetCreator(layer)->LayerSetPose(layer, position, orientation);
 }
 
 void lovrLayerGetDimensions(Layer* layer, float* width, float* height) {
-  ops->LayerGetDimensions(layer, width, height);
+  lovrLayerGetCreator(layer)->LayerGetDimensions(layer, width, height);
 }
 
 void lovrLayerSetDimensions(Layer* layer, float width, float height) {
-  ops->LayerSetDimensions(layer, width, height);
+  lovrLayerGetCreator(layer)->LayerSetDimensions(layer, width, height);
 }
 
 float lovrLayerGetCurve(Layer* layer) {
-  return ops->LayerGetCurve(layer);
+  return lovrLayerGetCreator(layer)->LayerGetCurve(layer);
 }
 
 bool lovrLayerSetCurve(Layer* layer, float curve) {
-  return ops->LayerSetCurve(layer, curve);
+  return lovrLayerGetCreator(layer)->LayerSetCurve(layer, curve);
 }
 
 void lovrLayerGetColor(Layer* layer, float color[4]) {
-  ops->LayerGetColor(layer, color);
+  lovrLayerGetCreator(layer)->LayerGetColor(layer, color);
 }
 
 void lovrLayerSetColor(Layer* layer, float color[4]) {
-  ops->LayerSetColor(layer, color);
+  lovrLayerGetCreator(layer)->LayerSetColor(layer, color);
 }
 
 void lovrLayerGetViewport(Layer* layer, int32_t* viewport) {
-  ops->LayerGetViewport(layer, viewport);
+  lovrLayerGetCreator(layer)->LayerGetViewport(layer, viewport);
 }
 
 void lovrLayerSetViewport(Layer* layer, int32_t* viewport) {
-  ops->LayerSetViewport(layer, viewport);
+  lovrLayerGetCreator(layer)->LayerSetViewport(layer, viewport);
 }
 
 struct Texture* lovrLayerGetTexture(Layer* layer) {
-  return ops->LayerGetTexture(layer);
+  return lovrLayerGetCreator(layer)->LayerGetTexture(layer);
 }
 
 struct Pass* lovrLayerGetPass(Layer* layer) {
-  return ops->LayerGetPass(layer);
+  return lovrLayerGetCreator(layer)->LayerGetPass(layer);
 }
 
 void lovrHeadsetGetVulkanPhysicalDevice(void* instance, uintptr_t physicalDevice) {

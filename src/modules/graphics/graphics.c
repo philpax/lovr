@@ -1,10 +1,14 @@
 #include "graphics/graphics.h"
+#include "graphics/graphics_session.h"
 #include "data/blob.h"
 #include "data/image.h"
 #include "data/modelData.h"
 #include "data/rasterizer.h"
 #include "event/event.h"
 #include "headset/headset.h"
+#if defined(LOVR_VK) && !defined(LOVR_DISABLE_HEADSET)
+#include "headset/headset_ops.h"
+#endif
 #include "math/math.h"
 #include "timer/timer.h"
 #include "core/gpu.h"
@@ -83,6 +87,10 @@ struct Buffer {
 struct Texture {
   atomic_uint ref;
   bool xrAcquired;
+  bool sessionOwned;
+  bool sessionDead;
+  Texture* sessionNext;
+  Texture** sessionPrev;
   Sync* sync;
   gpu_texture* gpu;
   gpu_texture* sampleViewFloat;
@@ -214,6 +222,7 @@ static_assert(offsetof(MaterialData, alphaCutoff) == offsetof(ModelMaterial, alp
 
 struct Material {
   atomic_uint ref;
+  bool sessionDead;
   uint32_t index;
   MaterialBlock* block;
   uint32_t bufferTick;
@@ -551,6 +560,9 @@ typedef struct {
 
 struct Pass {
   atomic_uint ref;
+  bool sessionDead;
+  Pass* sessionNext;
+  Pass** sessionPrev;
   uint32_t flags;
   Allocator allocator;
   BufferAllocator buffers;
@@ -615,6 +627,7 @@ static struct {
   atomic_uint bufferMemory;
   atomic_uint textureMemory;
   mtx_t lock;
+  bool lockReady;
   gpu_stream* stream;
   gpu_barrier barrier;
   gpu_barrier streamBarrier;
@@ -687,6 +700,104 @@ static void onMessage(void* context, const char* message);
 
 // Entry
 
+static Texture* sessionTextures;
+static Pass* sessionPasses;
+
+bool lovrTextureIsValid(Texture* texture) {
+  return texture && !texture->sessionDead;
+}
+
+bool lovrPassIsValid(Pass* pass) {
+  return pass && !pass->sessionDead;
+}
+
+static bool checkTextureSession(Texture* texture) {
+  if (texture && !lovrTextureIsValid(texture)) {
+    lovrSetError("Texture belongs to an invalidated headset session");
+    return false;
+  }
+  return true;
+}
+
+static bool checkMaterialSession(Material* material) {
+  if (!material) return true;
+  if (material->sessionDead) {
+    lovrSetError("Material belongs to an invalidated headset session");
+    return false;
+  }
+  for (uint32_t i = 0; i < MAX_MATERIAL_TEXTURES; i++) {
+    if (!checkTextureSession(material->textures[i])) return false;
+  }
+  return true;
+}
+
+bool lovrMaterialIsValid(Material* material) {
+  return material && checkMaterialSession(material);
+}
+
+static bool checkCanvasSession(Canvas* canvas) {
+  for (uint32_t i = 0; i < 4; i++) {
+    if (!checkTextureSession(canvas->color[i].texture) || !checkTextureSession(canvas->color[i].resolve)) return false;
+  }
+  return checkTextureSession(canvas->depth.texture) && checkTextureSession(canvas->depth.resolve) &&
+    checkTextureSession(canvas->foveation);
+}
+
+static bool checkPassSession(Pass* pass) {
+  if (!lovrPassIsValid(pass)) {
+    lovrSetError("Pass belongs to an invalidated headset session");
+    return false;
+  }
+  if (!checkCanvasSession(&pass->canvas)) return false;
+  for (uint32_t i = 0; i < 2; i++) {
+    for (AccessBlock* block = pass->access[i]; block; block = block->next) {
+      for (uint32_t j = 0; j < block->count; j++) {
+        if ((block->textureMask & (1ull << j)) && !checkTextureSession(block->list[j].object)) return false;
+      }
+    }
+  }
+  if (pass->pipeline && !checkMaterialSession(pass->pipeline->material)) return false;
+  for (uint32_t i = 0; i < pass->drawCount; i++) {
+    if (!checkMaterialSession(pass->draws[i].material)) return false;
+  }
+  return true;
+}
+
+bool lovrGraphicsRegisterSessionTexture(Texture* texture) {
+  lovrAssert(texture && texture->root == texture && !texture->sessionDead,
+    "Session texture registration requires a live root texture");
+  if (texture->sessionOwned) return true;
+  texture->sessionOwned = true;
+  texture->sessionNext = sessionTextures;
+  texture->sessionPrev = &sessionTextures;
+  if (sessionTextures) sessionTextures->sessionPrev = &texture->sessionNext;
+  sessionTextures = texture;
+  return true;
+}
+
+bool lovrGraphicsRegisterSessionPass(Pass* pass) {
+  lovrAssert(pass && !pass->sessionDead, "Session pass registration requires a live pass");
+  if (pass->sessionPrev) return true;
+  pass->sessionNext = sessionPasses;
+  pass->sessionPrev = &sessionPasses;
+  if (sessionPasses) sessionPasses->sessionPrev = &pass->sessionNext;
+  sessionPasses = pass;
+  return true;
+}
+
+static void destroyTextureBacking(Texture* texture) {
+  if (texture->sampleViewFloat && texture->sampleViewFloat != texture->gpu) gpu_texture_destroy(texture->sampleViewFloat), lovrFree(texture->sampleViewFloat);
+  if (texture->sampleViewUint && texture->sampleViewUint != texture->gpu) gpu_texture_destroy(texture->sampleViewUint), lovrFree(texture->sampleViewUint);
+  if (texture->renderView && texture->renderView != texture->gpu) gpu_texture_destroy(texture->renderView), lovrFree(texture->renderView);
+  if (texture->storageView && texture->storageView != texture->gpu) gpu_texture_destroy(texture->storageView), lovrFree(texture->storageView);
+  if (texture->gpu) gpu_texture_destroy(texture->gpu);
+  texture->gpu = NULL;
+  texture->sampleViewFloat = NULL;
+  texture->sampleViewUint = NULL;
+  texture->renderView = NULL;
+  texture->storageView = NULL;
+}
+
 bool lovrGraphicsInit(GraphicsConfig* config) {
   initAllocator(&thread.stack);
 
@@ -712,7 +823,8 @@ bool lovrGraphicsInit(GraphicsConfig* config) {
 #if defined(LOVR_VK) && !defined(LOVR_DISABLE_HEADSET)
     .vk.getPhysicalDevice = lovrHeadsetIsConnected() ? lovrHeadsetGetVulkanPhysicalDevice : NULL,
     .vk.createInstance = lovrHeadsetIsConnected() ? lovrHeadsetCreateVulkanInstance : NULL,
-    .vk.createDevice = lovrHeadsetIsConnected() ? lovrHeadsetCreateVulkanDevice : NULL
+    .vk.createDevice = lovrHeadsetIsConnected() ? lovrHeadsetCreateVulkanDevice : NULL,
+    .vk.beforeDestroy = lovrHeadsetBeforeGraphicsDestroy
 #endif
   };
 
@@ -726,15 +838,19 @@ bool lovrGraphicsInit(GraphicsConfig* config) {
     lovrFree(string);
 #endif
     lovrSetError("Failed to initialize GPU: %s", gpu_get_error());
-    lovrFree(thread.stack.memory);
-    lovrModuleReset(&ref);
+    if (gpu_destroy()) {
+      lovrFree(thread.stack.memory);
+      memset(&thread, 0, sizeof(thread));
+      lovrModuleReset(&ref);
+    }
     return false;
   }
 
   state.config = *config;
   state.timingEnabled = config->debug;
 
-  lovrAssertGoto(fail, !mtx_init(&state.lock, mtx_plain), "Failed to create mutex");
+  state.lockReady = mtx_init(&state.lock, mtx_plain) == thrd_success;
+  lovrAssertGoto(fail, state.lockReady, "Failed to create mutex");
 
   state.pipelines = lovrMalloc(MAX_PIPELINES * gpu_sizeof_pipeline());
   map_init(&state.pipelineLookup, 64);
@@ -906,12 +1022,11 @@ void lovrGraphicsDestroy(void) {
     memset(&thread, 0, sizeof(thread));
     return;
   }
-#ifndef LOVR_DISABLE_HEADSET
-  // If there's an active headset session it needs to be stopped so it can clean up its Pass and
-  // swapchain textures before gpu_destroy is called.  This is really hacky and should be solved
-  // with module-level refcounting in the future.
-  lovrHeadsetStop();
-#endif
+  if (!gpu_begin_teardown()) {
+    if (state.initialized) atomic_fetch_add(&ref, 1);
+    lovrSetError("GPU teardown: %s", gpu_get_error());
+    return;
+  }
   while (state.readbacks) {
     Readback* next = state.readbacks->next;
     lovrRelease(state.readbacks, lovrReadbackDestroy);
@@ -968,7 +1083,7 @@ void lovrGraphicsDestroy(void) {
     lovrFree(layout);
     layout = next;
   }
-  mtx_destroy(&state.lock);
+  if (state.lockReady) mtx_destroy(&state.lock);
   gpu_destroy();
 #ifdef LOVR_USE_GLSLANG
   if (state.glslang) glslang_finalize_process();
@@ -1774,6 +1889,9 @@ static void syncAttachment(Texture* texture, bool depth, bool resolve, bool load
 }
 
 bool lovrGraphicsSubmit(Pass** passes, uint32_t count) {
+  for (uint32_t i = 0; i < count; i++) {
+    if (!checkPassSession(passes[i])) return false;
+  }
   // We might be submitting a command that copies GPU data to a readback, but there might be an
   // older readback that references the same buffer.  We poll readbacks to avoid a situation where
   // a submitted command overwrites buffer data that hasn't been copied to CPU memory yet.
@@ -2783,6 +2901,7 @@ Texture* lovrTextureCreate(const TextureInfo* info) {
 }
 
 Texture* lovrTextureCreateView(Texture* parent, const TextureViewInfo* info) {
+  if (!checkTextureSession(parent)) return NULL;
   const TextureInfo* base = &parent->info;
   uint32_t maxLayers = base->type == TEXTURE_3D ? MAX(base->layers >> info->levelIndex, 1) : base->layers;
   uint32_t layers = info->layerCount == ~0u ? maxLayers - info->layerIndex : info->layerCount;
@@ -2920,18 +3039,29 @@ Texture* lovrTextureCreateView(Texture* parent, const TextureViewInfo* info) {
     texture->storageView = texture->gpu;
   }
 
+  {
+    texture->sessionOwned = texture->root->sessionOwned;
+    texture->sessionNext = sessionTextures;
+    texture->sessionPrev = &sessionTextures;
+    if (sessionTextures) sessionTextures->sessionPrev = &texture->sessionNext;
+    sessionTextures = texture;
+  }
   return texture;
 }
 
 void lovrTextureDestroy(void* ref) {
   Texture* texture = ref;
+  if (texture->sessionPrev) {
+    *texture->sessionPrev = texture->sessionNext;
+    if (texture->sessionNext) texture->sessionNext->sessionPrev = texture->sessionPrev;
+  }
   if (texture != state.window) {
     if (texture->root == texture || texture->info.label != texture->root->info.label) {
       lovrFree((char*) texture->info.label);
     }
     lovrRelease(texture->sampler, lovrSamplerDestroy);
+    if (texture->material) texture->material->sessionDead = true;
     lovrRelease(texture->material, lovrMaterialDestroy);
-    if (texture->root != texture) lovrRelease(texture->root, lovrTextureDestroy);
     if (texture->sampleViewFloat && texture->sampleViewFloat != texture->gpu) gpu_texture_destroy(texture->sampleViewFloat), lovrFree(texture->sampleViewFloat);
     if (texture->sampleViewUint && texture->sampleViewUint != texture->gpu) gpu_texture_destroy(texture->sampleViewUint), lovrFree(texture->sampleViewUint);
     if (texture->renderView && texture->renderView != texture->gpu) gpu_texture_destroy(texture->renderView), lovrFree(texture->renderView);
@@ -2944,6 +3074,7 @@ void lovrTextureDestroy(void* ref) {
     state.textureMemory -= texture->memorySize;
     lovrFree(texture->sync);
   }
+  if (texture->root != texture) lovrRelease(texture->root, lovrTextureDestroy);
   lovrFree(texture);
 }
 
@@ -2952,6 +3083,7 @@ const TextureInfo* lovrTextureGetInfo(Texture* texture) {
 }
 
 bool lovrTextureSetPixels(Texture* texture, Image* image, uint32_t dstOffset[4], uint32_t srcOffset[4], uint32_t extent[3]) {
+  if (!checkTextureSession(texture)) return false;
   TextureFormat format = texture->info.format;
 
   lovrCheck(texture->info.usage & TEXTURE_TRANSFER, "Texture must be created with the 'transfer' usage to copy to it");
@@ -3026,6 +3158,7 @@ bool lovrTextureSetPixels(Texture* texture, Image* image, uint32_t dstOffset[4],
 }
 
 bool lovrTextureCopy(Texture* src, Texture* dst, uint32_t srcOffset[4], uint32_t dstOffset[4], uint32_t extent[3]) {
+  if (!checkTextureSession(src) || !checkTextureSession(dst)) return false;
   if (src->info.format != dst->info.format) return lovrTextureBlit(src, dst, srcOffset, dstOffset, extent, extent, FILTER_NEAREST);
 
   if (extent[0] == ~0u) extent[0] = MIN(src->info.width - srcOffset[0], dst->info.width - dstOffset[0]);
@@ -3053,6 +3186,7 @@ bool lovrTextureCopy(Texture* src, Texture* dst, uint32_t srcOffset[4], uint32_t
 }
 
 bool lovrTextureBlit(Texture* src, Texture* dst, uint32_t srcOffset[4], uint32_t dstOffset[4], uint32_t srcExtent[3], uint32_t dstExtent[3], FilterMode filter) {
+  if (!checkTextureSession(src) || !checkTextureSession(dst)) return false;
   bool depth = isDepthFormat(src->info.format) || isDepthFormat(dst->info.format);
 
   if (depth) filter = FILTER_NEAREST;
@@ -3091,6 +3225,7 @@ bool lovrTextureBlit(Texture* src, Texture* dst, uint32_t srcOffset[4], uint32_t
 }
 
 bool lovrTextureClear(Texture* texture, float value[4], uint32_t layer, uint32_t layerCount, uint32_t level, uint32_t levelCount) {
+  if (!checkTextureSession(texture)) return false;
   if (layerCount == ~0u) layerCount = texture->info.layers - layer;
   if (levelCount == ~0u) levelCount = texture->info.mipmaps - level;
   lovrCheck(texture->info.usage & TEXTURE_TRANSFER, "Texture must be created with 'transfer' usage to clear it");
@@ -3106,6 +3241,7 @@ bool lovrTextureClear(Texture* texture, float value[4], uint32_t layer, uint32_t
 }
 
 bool lovrTextureGenerateMipmaps(Texture* texture, uint32_t base, uint32_t count) {
+  if (!checkTextureSession(texture)) return false;
   if (count == ~0u) count = texture->info.mipmaps - (base + 1);
   uint32_t supports = state.features.formats[texture->info.format][texture->info.srgb];
   lovrCheck(texture->info.usage & TEXTURE_TRANSFER, "Texture must be created with the 'transfer' usage to mipmap it");
@@ -3122,6 +3258,7 @@ bool lovrTextureGenerateMipmaps(Texture* texture, uint32_t base, uint32_t count)
 }
 
 bool lovrTextureImportAcquire(Texture* texture, uint32_t oldLayout, uint32_t srcQueueFamily) {
+  if (!checkTextureSession(texture)) return false;
   lovrCheck(texture->info.foreign, "Texture must be created with 'foreign' set to acquire it");
   mtx_lock(&state.lock);
   gpu_import_acquire(state.stream, texture->root->gpu, oldLayout, srcQueueFamily);
@@ -3130,6 +3267,7 @@ bool lovrTextureImportAcquire(Texture* texture, uint32_t oldLayout, uint32_t src
 }
 
 bool lovrTextureImportRelease(Texture* texture, uint32_t newLayout, uint32_t dstQueueFamily) {
+  if (!checkTextureSession(texture)) return false;
   lovrCheck(texture->info.foreign, "Texture must be created with 'foreign' set to release it");
   mtx_lock(&state.lock);
   gpu_import_release(state.stream, texture->root->gpu, newLayout, dstQueueFamily);
@@ -3142,12 +3280,14 @@ Sampler* lovrTextureGetSampler(Texture* texture) {
 }
 
 void lovrTextureSetSampler(Texture* texture, Sampler* sampler) {
+  if (!checkTextureSession(texture)) return;
   lovrRelease(texture->sampler, lovrSamplerDestroy);
   texture->sampler = sampler;
   lovrRetain(sampler);
 }
 
 Material* lovrTextureToMaterial(Texture* texture) {
+  if (!checkTextureSession(texture)) return NULL;
   if (!texture->material) {
     texture->material = lovrMaterialCreate(texture);
     if (!texture->material) return NULL;
@@ -4258,6 +4398,7 @@ static void lovrMaterialRecycle(Material* material) {
 }
 
 static bool lovrMaterialUpload(Material* material, size_t offset, size_t size) {
+  if (!checkMaterialSession(material)) return false;
   if (material->bufferTick != state.tick) {
     mtx_lock(&state.lock);
     BufferView staging = getBuffer(GPU_BUFFER_STREAM, sizeof(MaterialData), 4);
@@ -4279,6 +4420,7 @@ static bool lovrMaterialUpload(Material* material, size_t offset, size_t size) {
 }
 
 Material* lovrMaterialCreate(Texture* texture) {
+  if (!checkTextureSession(texture)) return NULL;
   Material* material = lovrCalloc(sizeof(Material));
   material->ref = 1;
 
@@ -4344,6 +4486,7 @@ void lovrMaterialGetColor(Material* material, float color[4]) {
 }
 
 bool lovrMaterialSetColor(Material* material, float color[4]) {
+  if (!checkMaterialSession(material)) return false;
   material->data.color[0] = lovrMathGammaToLinear(color[0]);
   material->data.color[1] = lovrMathGammaToLinear(color[1]);
   material->data.color[2] = lovrMathGammaToLinear(color[2]);
@@ -4359,6 +4502,7 @@ void lovrMaterialGetGlow(Material* material, float glow[4]) {
 }
 
 bool lovrMaterialSetGlow(Material* material, float glow[4]) {
+  if (!checkMaterialSession(material)) return false;
   material->data.glow[0] = lovrMathGammaToLinear(glow[0]);
   material->data.glow[1] = lovrMathGammaToLinear(glow[1]);
   material->data.glow[2] = lovrMathGammaToLinear(glow[2]);
@@ -4371,6 +4515,7 @@ void lovrMaterialGetQuad(Material* material, float quad[4]) {
 }
 
 bool lovrMaterialSetQuad(Material* material, float quad[4]) {
+  if (!checkMaterialSession(material)) return false;
   memcpy(material->data.quad, quad, 4 * sizeof(float));
   return lovrMaterialUpload(material, offsetof(MaterialData, quad), sizeof(material->data.quad));
 }
@@ -4381,6 +4526,7 @@ void lovrMaterialGetSdfRange(Material* material, float* x, float* y) {
 }
 
 bool lovrMaterialSetSdfRange(Material* material, float x, float y) {
+  if (!checkMaterialSession(material)) return false;
   material->data.sdfRange[0] = x;
   material->data.sdfRange[1] = y;
   return lovrMaterialUpload(material, offsetof(MaterialData, sdfRange), sizeof(material->data.sdfRange));
@@ -4391,6 +4537,7 @@ float lovrMaterialGetMetalness(Material* material) {
 }
 
 bool lovrMaterialSetMetalness(Material* material, float metalness) {
+  if (!checkMaterialSession(material)) return false;
   material->data.metalness = metalness;
   return lovrMaterialUpload(material, offsetof(MaterialData, metalness), sizeof(material->data.metalness));
 }
@@ -4400,6 +4547,7 @@ float lovrMaterialGetRoughness(Material* material) {
 }
 
 bool lovrMaterialSetRoughness(Material* material, float roughness) {
+  if (!checkMaterialSession(material)) return false;
   material->data.roughness = roughness;
   return lovrMaterialUpload(material, offsetof(MaterialData, roughness), sizeof(material->data.roughness));
 }
@@ -4409,6 +4557,7 @@ float lovrMaterialGetClearcoat(Material* material) {
 }
 
 bool lovrMaterialSetClearcoat(Material* material, float clearcoat) {
+  if (!checkMaterialSession(material)) return false;
   material->data.clearcoat = clearcoat;
   return lovrMaterialUpload(material, offsetof(MaterialData, clearcoat), sizeof(material->data.clearcoat));
 }
@@ -4418,6 +4567,7 @@ float lovrMaterialGetClearcoatRoughness(Material* material) {
 }
 
 bool lovrMaterialSetClearcoatRoughness(Material* material, float clearcoatRoughness) {
+  if (!checkMaterialSession(material)) return false;
   material->data.clearcoatRoughness = clearcoatRoughness;
   return lovrMaterialUpload(material, offsetof(MaterialData, clearcoatRoughness), sizeof(material->data.clearcoatRoughness));
 }
@@ -4427,6 +4577,7 @@ float lovrMaterialGetOcclusionStrength(Material* material) {
 }
 
 bool lovrMaterialSetOcclusionStrength(Material* material, float occlusionStrength) {
+  if (!checkMaterialSession(material)) return false;
   material->data.occlusionStrength = occlusionStrength;
   return lovrMaterialUpload(material, offsetof(MaterialData, occlusionStrength), sizeof(material->data.occlusionStrength));
 }
@@ -4436,6 +4587,7 @@ float lovrMaterialGetNormalScale(Material* material) {
 }
 
 bool lovrMaterialSetNormalScale(Material* material, float normalScale) {
+  if (!checkMaterialSession(material)) return false;
   material->data.normalScale = normalScale;
   return lovrMaterialUpload(material, offsetof(MaterialData, normalScale), sizeof(material->data.normalScale));
 }
@@ -4445,6 +4597,7 @@ float lovrMaterialGetAlphaCutoff(Material* material) {
 }
 
 bool lovrMaterialSetAlphaCutoff(Material* material, float alphaCutoff) {
+  if (!checkMaterialSession(material)) return false;
   material->data.alphaCutoff = alphaCutoff;
   return lovrMaterialUpload(material, offsetof(MaterialData, alphaCutoff), sizeof(material->data.alphaCutoff));
 }
@@ -4454,6 +4607,7 @@ bool lovrMaterialIsDoubleSided(Material* material) {
 }
 
 void lovrMaterialSetDoubleSided(Material* material, bool doubleSided) {
+  if (!checkMaterialSession(material)) return;
   material->data.doubleSided = doubleSided;
 }
 
@@ -4462,6 +4616,7 @@ Texture* lovrMaterialGetTexture(Material* material, MaterialTexture type) {
 }
 
 bool lovrMaterialSetTexture(Material* material, MaterialTexture type, Texture* texture) {
+  if (!checkMaterialSession(material) || !checkTextureSession(texture)) return false;
   if (texture == material->textures[type]) return true;
 
   if (texture) {
@@ -6617,6 +6772,7 @@ Readback* lovrReadbackCreateBuffer(Buffer* buffer, uint32_t offset, uint32_t ext
 }
 
 Readback* lovrReadbackCreateTexture(Texture* texture, uint32_t offset[4], uint32_t extent[3]) {
+  if (!checkTextureSession(texture)) return NULL;
   if (extent[0] == ~0u) extent[0] = MAX(texture->info.width >> offset[3], 1) - offset[0];
   if (extent[1] == ~0u) extent[1] = MAX(texture->info.height >> offset[3], 1) - offset[1];
   lovrCheck(extent[2] == 1, "Currently, only one layer can be read from a Texture");
@@ -6880,12 +7036,115 @@ Pass* lovrPassCreate(const char* label) {
   return pass;
 }
 
+bool lovrGraphicsPrepareSessionTeardown(void) {
+  if (!gpu_prepare_teardown()) {
+    lovrSetError("Failed to complete headset session teardown: %s", gpu_get_error());
+    return false;
+  }
+  lovrGraphicsInvalidateSessionResources();
+  gpu_flush_deferred_after_idle();
+  return true;
+}
+
+void lovrGraphicsInvalidateSessionPass(Pass* pass) {
+  if (!pass || pass->sessionDead) return;
+  if (pass->sessionPrev) {
+    *pass->sessionPrev = pass->sessionNext;
+    if (pass->sessionNext) pass->sessionNext->sessionPrev = pass->sessionPrev;
+    pass->sessionPrev = NULL;
+    pass->sessionNext = NULL;
+  }
+  uint32_t width = pass->width, height = pass->height, views = pass->views;
+  lovrPassSetCanvas(pass, NULL);
+  lovrPassRelease(pass);
+  pass->pipeline = NULL;
+  pass->sampler = NULL;
+  pass->drawCount = 0;
+  pass->computeCount = 0;
+  pass->access[0] = pass->access[1] = NULL;
+  lovrRelease(pass->tally.buffer, lovrBufferDestroy);
+  lovrRelease(pass->tally.tempBuffer, lovrBufferDestroy);
+  if (pass->tally.gpu) {
+    gpu_tally_destroy(pass->tally.gpu);
+    lovrFree(pass->tally.gpu);
+  }
+  memset(&pass->tally, 0, sizeof(pass->tally));
+  destroyBuffers(&pass->buffers);
+  memset(&pass->buffers, 0, sizeof(pass->buffers));
+  memset(&pass->target, 0, sizeof(pass->target));
+  pass->width = width;
+  pass->height = height;
+  pass->views = views;
+  pass->sessionDead = true;
+}
+
+void lovrGraphicsInvalidateSessionTexture(Texture* texture) {
+  if (!texture || texture->sessionDead) return;
+  Texture* root = texture->root;
+  lovrRetain(root);
+  Texture* family = NULL;
+  for (Texture* view = sessionTextures, *next; view; view = next) {
+    next = view->sessionNext;
+    if (view->root != root) continue;
+    lovrRetain(view);
+    *view->sessionPrev = view->sessionNext;
+    if (view->sessionNext) view->sessionNext->sessionPrev = view->sessionPrev;
+    view->sessionPrev = NULL;
+    view->sessionNext = family;
+    family = view;
+    view->sessionDead = true;
+    view->xrAcquired = false;
+    if (view->material) view->material->sessionDead = true;
+    if (view != root) destroyTextureBacking(view);
+  }
+  root->sessionDead = true;
+  root->xrAcquired = false;
+  if (root->material) root->material->sessionDead = true;
+  destroyTextureBacking(root);
+  for (Texture* view = family; view; view = view->sessionNext) {
+    if (view == root) continue;
+    lovrRelease(view->sampler, lovrSamplerDestroy);
+    view->sampler = NULL;
+    lovrRelease(view->material, lovrMaterialDestroy);
+    view->material = NULL;
+  }
+  lovrRelease(root->sampler, lovrSamplerDestroy);
+  root->sampler = NULL;
+  lovrRelease(root->material, lovrMaterialDestroy);
+  root->material = NULL;
+  while (family) {
+    Texture* view = family;
+    family = view->sessionNext;
+    view->sessionNext = NULL;
+    lovrRelease(view, lovrTextureDestroy);
+  }
+  lovrRelease(root, lovrTextureDestroy);
+}
+
+void lovrGraphicsInvalidateSessionResources(void) {
+  while (sessionPasses) lovrGraphicsInvalidateSessionPass(sessionPasses);
+  for (;;) {
+    Texture* texture = sessionTextures;
+    while (texture && !texture->root->sessionOwned) texture = texture->sessionNext;
+    if (!texture) break;
+    lovrGraphicsInvalidateSessionTexture(texture);
+  }
+}
+
 void lovrPassDestroy(void* ref) {
   Pass* pass = ref;
-  lovrPassSetCanvas(pass, NULL);
+  if (pass->sessionPrev) {
+    *pass->sessionPrev = pass->sessionNext;
+    if (pass->sessionNext) pass->sessionNext->sessionPrev = pass->sessionPrev;
+  }
+  if (!pass->sessionDead) {
+    lovrPassSetCanvas(pass, NULL);
+    lovrPassRelease(pass);
+  }
   lovrRelease(pass->tally.buffer, lovrBufferDestroy);
   if (pass->tally.gpu) {
     gpu_tally_destroy(pass->tally.gpu);
+    lovrFree(pass->tally.gpu);
     lovrRelease(pass->tally.tempBuffer, lovrBufferDestroy);
   }
   destroyBuffers(&pass->buffers);
@@ -6895,6 +7154,7 @@ void lovrPassDestroy(void* ref) {
 }
 
 void lovrPassReset(Pass* pass) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   lovrPassRelease(pass);
 
   pass->allocator.cursor = 0;
@@ -6987,6 +7247,8 @@ void lovrPassGetCanvas(Pass* pass, Canvas* canvas) {
 }
 
 bool lovrPassSetCanvas(Pass* pass, Canvas* canvas) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
+  if (canvas && !checkCanvasSession(canvas)) return false;
   gpu_canvas* target = &pass->target;
 
   if (!canvas || (!canvas->color->texture && !canvas->depth.texture)) {
@@ -7250,6 +7512,7 @@ void lovrPassGetClear(Pass* pass, LoadAction loads[4], float clears[4][4], LoadA
 }
 
 bool lovrPassSetClear(Pass* pass, LoadAction loads[4], float clears[4][4], LoadAction depthLoad, float depthClear) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   gpu_canvas* target = &pass->target;
   for (uint32_t i = 0; i < 4 && pass->canvas.color[i].texture; i++) {
     lovrCheck(loads[i] != LOAD_KEEP || !pass->tempColor[i], "Can not set clear to false unless canvas texture sample count matches pass sample count (try setting pass sample count to 1)");
@@ -7312,30 +7575,35 @@ static Camera* getCamera(Pass* pass) {
 }
 
 bool lovrPassGetViewMatrix(Pass* pass, uint32_t index, float viewMatrix[16]) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(index < pass->views, "Invalid view index '%d'", index + 1);
   mat4_init(viewMatrix, getCamera(pass)[index].viewMatrix);
   return true;
 }
 
 bool lovrPassSetViewMatrix(Pass* pass, uint32_t index, float viewMatrix[16]) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(index < pass->views, "Invalid view index '%d'", index + 1);
   mat4_init(getCamera(pass)[index].viewMatrix, viewMatrix);
   return true;
 }
 
 bool lovrPassGetProjection(Pass* pass, uint32_t index, float projection[16]) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(index < pass->views, "Invalid view index '%d'", index + 1);
   mat4_init(projection, getCamera(pass)[index].projection);
   return true;
 }
 
 bool lovrPassSetProjection(Pass* pass, uint32_t index, float projection[16]) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(index < pass->views, "Invalid view index '%d'", index + 1);
   mat4_init(getCamera(pass)[index].projection, projection);
   return true;
 }
 
 bool lovrPassGetViewRay(Pass* pass, uint32_t view, uint32_t x, uint32_t y, float position[3], float direction[3]) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(view < pass->views, "Invalid view index '%d'", view + 1);
   x = MIN(x, pass->width);
   y = MIN(y, pass->height);
@@ -7356,6 +7624,7 @@ bool lovrPassGetViewRay(Pass* pass, uint32_t view, uint32_t x, uint32_t y, float
 }
 
 bool lovrPassPush(Pass* pass, StackType stack) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   switch (stack) {
     case STACK_TRANSFORM:
       lovrCheck(++pass->transformIndex < TRANSFORM_STACK_SIZE, "%s stack overflow (more pushes than pops?)", "Transform");
@@ -7375,6 +7644,7 @@ bool lovrPassPush(Pass* pass, StackType stack) {
 }
 
 bool lovrPassPop(Pass* pass, StackType stack) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   switch (stack) {
     case STACK_TRANSFORM:
       lovrCheck(--pass->transformIndex < TRANSFORM_STACK_SIZE, "%s stack underflow (more pops than pushes?)", "Transform");
@@ -7393,31 +7663,38 @@ bool lovrPassPop(Pass* pass, StackType stack) {
 }
 
 void lovrPassOrigin(Pass* pass) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   mat4_identity(pass->transform);
 }
 
 void lovrPassTranslate(Pass* pass, vec3 translation) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   mat4_translate(pass->transform, translation[0], translation[1], translation[2]);
 }
 
 void lovrPassRotate(Pass* pass, quat rotation) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   mat4_rotateQuat(pass->transform, rotation);
 }
 
 void lovrPassScale(Pass* pass, vec3 scale) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   mat4_scale(pass->transform, scale[0], scale[1], scale[2]);
 }
 
 void lovrPassTransform(Pass* pass, mat4 transform) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   mat4_mul(pass->transform, transform);
 }
 
 void lovrPassSetAlphaToCoverage(Pass* pass, bool enabled) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   pass->pipeline->dirty |= enabled != pass->pipeline->info.multisample.alphaToCoverage;
   pass->pipeline->info.multisample.alphaToCoverage = enabled;
 }
 
 void lovrPassSetBlendMode(Pass* pass, uint32_t index, BlendMode mode, BlendAlphaMode alphaMode) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   if (mode == BLEND_NONE) {
     pass->pipeline->dirty |= pass->pipeline->info.color[index].blend.enabled;
     memset(&pass->pipeline->info.color[index].blend, 0, sizeof(gpu_blend_state));
@@ -7468,6 +7745,7 @@ void lovrPassSetBlendMode(Pass* pass, uint32_t index, BlendMode mode, BlendAlpha
 }
 
 void lovrPassSetBlendState(Pass* pass, uint32_t index, bool enable, BlendState color, BlendState alpha) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   if (!enable) {
     pass->pipeline->dirty |= pass->pipeline->info.color[index].blend.enabled;
     memset(&pass->pipeline->info.color[index].blend, 0, sizeof(gpu_blend_state));
@@ -7487,6 +7765,7 @@ void lovrPassSetBlendState(Pass* pass, uint32_t index, bool enable, BlendState c
 }
 
 void lovrPassSetColor(Pass* pass, float color[4]) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   pass->pipeline->color[0] = lovrMathGammaToLinear(color[0]);
   pass->pipeline->color[1] = lovrMathGammaToLinear(color[1]);
   pass->pipeline->color[2] = lovrMathGammaToLinear(color[2]);
@@ -7494,28 +7773,33 @@ void lovrPassSetColor(Pass* pass, float color[4]) {
 }
 
 void lovrPassSetColorWrite(Pass* pass, uint32_t index, bool r, bool g, bool b, bool a) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   uint8_t mask = (r << 0) | (g << 1) | (b << 2) | (a << 3);
   pass->pipeline->dirty |= pass->pipeline->info.color[index].mask != mask;
   pass->pipeline->info.color[index].mask = mask;
 }
 
 void lovrPassSetDepthTest(Pass* pass, CompareMode test) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   pass->pipeline->dirty |= pass->pipeline->info.depth.test != (gpu_compare_mode) test;
   pass->pipeline->info.depth.test = (gpu_compare_mode) test;
 }
 
 void lovrPassSetDepthWrite(Pass* pass, bool write) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   pass->pipeline->dirty |= pass->pipeline->info.depth.write != write;
   pass->pipeline->info.depth.write = write;
 }
 
 void lovrPassSetDepthOffset(Pass* pass, float offset, float sloped) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   pass->pipeline->info.rasterizer.depthOffset = offset;
   pass->pipeline->info.rasterizer.depthOffsetSloped = sloped;
   pass->pipeline->dirty = true;
 }
 
 void lovrPassSetDepthClamp(Pass* pass, bool clamp) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   if (state.features.depthClamp) {
     pass->pipeline->dirty |= pass->pipeline->info.rasterizer.depthClamp != clamp;
     pass->pipeline->info.rasterizer.depthClamp = clamp;
@@ -7523,11 +7807,13 @@ void lovrPassSetDepthClamp(Pass* pass, bool clamp) {
 }
 
 void lovrPassSetFaceCull(Pass* pass, CullMode mode) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   pass->pipeline->dirty |= pass->pipeline->info.rasterizer.cullMode != (gpu_cull_mode) mode;
   pass->pipeline->info.rasterizer.cullMode = (gpu_cull_mode) mode;
 }
 
 void lovrPassSetFont(Pass* pass, Font* font) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   if (pass->pipeline->font != font) {
     lovrRetain(font);
     lovrRelease(pass->pipeline->font, lovrFontDestroy);
@@ -7536,7 +7822,9 @@ void lovrPassSetFont(Pass* pass, Font* font) {
 }
 
 void lovrPassSetMaterial(Pass* pass, Material* material) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   if (!material) material = state.defaultMaterial;
+  if (!checkMaterialSession(material)) return;
 
   if (pass->pipeline->material != material) {
     lovrRetain(material);
@@ -7546,10 +7834,12 @@ void lovrPassSetMaterial(Pass* pass, Material* material) {
 }
 
 void lovrPassSetMeshMode(Pass* pass, DrawMode mode) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   pass->pipeline->mode = mode;
 }
 
 void lovrPassSetSampler(Pass* pass, Sampler* sampler) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   if (sampler != pass->sampler) {
     lovrRetain(sampler);
     lovrRelease(pass->sampler, lovrSamplerDestroy);
@@ -7558,6 +7848,7 @@ void lovrPassSetSampler(Pass* pass, Sampler* sampler) {
 }
 
 bool lovrPassSetScissor(Pass* pass, uint32_t scissor[4]) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   if (~pass->flags & DIRTY_SCISSOR) {
     uint32_t* scissors = lovrPassAllocate(pass, (pass->scissorCount + 1) * 4 * sizeof(uint32_t));
     if (pass->scissors) memcpy(scissors, pass->scissors, pass->scissorCount * 4 * sizeof(uint32_t));
@@ -7586,6 +7877,7 @@ bool lovrPassSetScissor(Pass* pass, uint32_t scissor[4]) {
 }
 
 void lovrPassSetShader(Pass* pass, Shader* shader) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   Shader* old = pass->pipeline->shader;
 
   if (shader == old) {
@@ -7686,6 +7978,7 @@ void lovrPassSetShader(Pass* pass, Shader* shader) {
 }
 
 bool lovrPassSetStencilTest(Pass* pass, CompareMode test, uint8_t value, uint8_t mask) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   TextureFormat depthFormat = pass->canvas.depth.texture ? pass->canvas.depth.texture->info.format : pass->canvas.depthFormat;
   lovrCheck(depthFormat == FORMAT_D32FS8 || depthFormat == FORMAT_D24S8, "Trying to set stencil mode, but Pass depth texture does not use a stencil format");
   bool hasReplace = false;
@@ -7711,6 +8004,7 @@ bool lovrPassSetStencilTest(Pass* pass, CompareMode test, uint8_t value, uint8_t
 }
 
 bool lovrPassSetStencilWrite(Pass* pass, StencilAction actions[3], uint8_t value, uint8_t mask) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   TextureFormat depthFormat = pass->canvas.depth.texture ? pass->canvas.depth.texture->info.format : pass->canvas.depthFormat;
   lovrCheck(depthFormat == FORMAT_D32FS8 || depthFormat == FORMAT_D24S8, "Trying to set stencil mode, but Pass depth texture does not use a stencil format");
   bool hasReplace = actions[0] == STENCIL_REPLACE || actions[1] == STENCIL_REPLACE || actions[2] == STENCIL_REPLACE;
@@ -7727,10 +8021,12 @@ bool lovrPassSetStencilWrite(Pass* pass, StencilAction actions[3], uint8_t value
 }
 
 void lovrPassSetViewCull(Pass* pass, bool enable) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   pass->pipeline->viewCull = enable;
 }
 
 void lovrPassSetViewport(Pass* pass, float viewport[6]) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   if (~pass->flags & DIRTY_VIEWPORT) {
     float* viewports = lovrPassAllocate(pass, (pass->viewportCount + 1) * 6 * sizeof(float));
     if (pass->viewports) memcpy(viewports, pass->viewports, pass->viewportCount * 6 * sizeof(float));
@@ -7754,11 +8050,13 @@ void lovrPassSetViewport(Pass* pass, float viewport[6]) {
 }
 
 void lovrPassSetWinding(Pass* pass, Winding winding) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   pass->pipeline->dirty |= pass->pipeline->info.rasterizer.winding != (gpu_winding) winding;
   pass->pipeline->info.rasterizer.winding = (gpu_winding) winding;
 }
 
 void lovrPassSetWireframe(Pass* pass, bool wireframe) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   if (state.features.wireframe) {
     pass->pipeline->dirty |= pass->pipeline->info.rasterizer.wireframe != (gpu_winding) wireframe;
     pass->pipeline->info.rasterizer.wireframe = wireframe;
@@ -7766,6 +8064,7 @@ void lovrPassSetWireframe(Pass* pass, bool wireframe) {
 }
 
 bool lovrPassSendBuffer(Pass* pass, const char* name, size_t length, Buffer* buffer, uint32_t offset, uint32_t extent) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   Shader* shader = pass->pipeline->shader;
   lovrCheck(shader, "A Shader must be active to send resources");
 
@@ -7802,6 +8101,10 @@ bool lovrPassSendBuffer(Pass* pass, const char* name, size_t length, Buffer* buf
 }
 
 bool lovrPassSendTexture(Pass* pass, const char* name, size_t length, Texture** textures, uint32_t count) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
+  for (uint32_t i = 0; i < count; i++) {
+    if (!checkTextureSession(textures[i])) return false;
+  }
   if (count == 0) return true;
 
   Shader* shader = pass->pipeline->shader;
@@ -7859,6 +8162,7 @@ bool lovrPassSendTexture(Pass* pass, const char* name, size_t length, Texture** 
 }
 
 bool lovrPassSendSampler(Pass* pass, const char* name, size_t length, Sampler* sampler) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   Shader* shader = pass->pipeline->shader;
   lovrCheck(shader, "A Shader must be active to send resources");
 
@@ -7875,6 +8179,7 @@ bool lovrPassSendSampler(Pass* pass, const char* name, size_t length, Sampler* s
 }
 
 bool lovrPassSendRaytracer(Pass* pass, const char* name, size_t length, Raytracer* raytracer) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   Shader* shader = pass->pipeline->shader;
   lovrCheck(shader, "A Shader must be active to send resources");
 
@@ -7891,6 +8196,7 @@ bool lovrPassSendRaytracer(Pass* pass, const char* name, size_t length, Raytrace
 }
 
 bool lovrPassSendData(Pass* pass, const char* name, size_t length, void** data, DataField** format) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   Shader* shader = pass->pipeline->shader;
   lovrCheck(shader, "A Shader must be active to send data to it");
 
@@ -8124,6 +8430,7 @@ static bool lovrPassResolveVertices(Pass* pass, DrawInfo* info, Draw* draw) {
 }
 
 bool lovrPassDraw(Pass* pass, DrawInfo* info) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   if (pass->drawCount >= pass->drawCapacity) {
     lovrAssert(pass->drawCount < 1 << 16, "Pass has too many draws!");
     pass->drawCapacity = pass->drawCapacity > 0 ? pass->drawCapacity << 1 : 1;
@@ -8150,6 +8457,7 @@ bool lovrPassDraw(Pass* pass, DrawInfo* info) {
   draw->material = info->material;
   if (!draw->material) draw->material = pass->pipeline->material;
   if (!draw->material) draw->material = state.defaultMaterial;
+  if (!checkMaterialSession(draw->material)) return false;
   trackMaterial(pass, draw->material);
 
   draw->start = info->start;
@@ -8179,6 +8487,7 @@ bool lovrPassDraw(Pass* pass, DrawInfo* info) {
 }
 
 bool lovrPassPoints(Pass* pass, uint32_t count, float** points) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   return lovrPassDraw(pass, &(DrawInfo) {
     .mode = DRAW_POINTS,
     .vertex.format = VERTEX_POINT,
@@ -8188,6 +8497,7 @@ bool lovrPassPoints(Pass* pass, uint32_t count, float** points) {
 }
 
 bool lovrPassLine(Pass* pass, uint32_t count, float** points) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(count >= 2, "Need at least 2 points to make a line");
 
   uint16_t* indices;
@@ -8214,6 +8524,7 @@ bool lovrPassLine(Pass* pass, uint32_t count, float** points) {
 }
 
 bool lovrPassPolygon(Pass* pass, uint32_t count, float** vertices) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(count >= 3, "Need at least 3 points to make a polygon");
 
   uint16_t* indices;
@@ -8241,6 +8552,7 @@ bool lovrPassPolygon(Pass* pass, uint32_t count, float** vertices) {
 }
 
 bool lovrPassPlane(Pass* pass, float* transform, DrawStyle style, uint32_t cols, uint32_t rows) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   uint32_t key[] = { SHAPE_PLANE, style, cols, rows };
   uint32_t vertexCount = (cols + 1) * (rows + 1);
   uint32_t indexCount = style == STYLE_LINE ? (2 * (rows + 1) + 2 * (cols + 1)) : (cols * rows) * 6;
@@ -8310,6 +8622,7 @@ bool lovrPassPlane(Pass* pass, float* transform, DrawStyle style, uint32_t cols,
 }
 
 bool lovrPassRoundrect(Pass* pass, float* transform, float r, uint32_t segments) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   bool thicc = vec3_length(transform + 8) > 0.f;
   float w = vec3_length(transform + 0);
   float h = vec3_length(transform + 4);
@@ -8448,6 +8761,7 @@ bool lovrPassRoundrect(Pass* pass, float* transform, float r, uint32_t segments)
 }
 
 bool lovrPassBox(Pass* pass, float* transform, DrawStyle style) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   uint32_t key[] = { SHAPE_BOX, style };
   ShapeVertex* vertices;
   uint16_t* indices;
@@ -8551,6 +8865,7 @@ bool lovrPassBox(Pass* pass, float* transform, DrawStyle style) {
 }
 
 bool lovrPassCircle(Pass* pass, float* transform, DrawStyle style, float angle1, float angle2, uint32_t segments) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   if (fabsf(angle1 - angle2) >= 2.f * (float) M_PI) {
     angle1 = 0.f;
     angle2 = 2.f * (float) M_PI;
@@ -8610,6 +8925,7 @@ bool lovrPassCircle(Pass* pass, float* transform, DrawStyle style, float angle1,
 }
 
 bool lovrPassSphere(Pass* pass, float* transform, uint32_t segmentsH, uint32_t segmentsV) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(segmentsH >= 2 && segmentsV >= 2, "Sphere segment count must be >= 2");
 
   uint32_t vertexCount = 2 + (segmentsH + 1) * (segmentsV - 1);
@@ -8693,6 +9009,7 @@ bool lovrPassSphere(Pass* pass, float* transform, uint32_t segmentsH, uint32_t s
 }
 
 bool lovrPassCylinder(Pass* pass, float* transform, bool capped, float angle1, float angle2, uint32_t segments) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   if (fabsf(angle1 - angle2) >= 2.f * (float) M_PI) {
     angle1 = 0.f;
     angle2 = 2.f * (float) M_PI;
@@ -8785,6 +9102,7 @@ bool lovrPassCylinder(Pass* pass, float* transform, bool capped, float angle1, f
 }
 
 bool lovrPassCone(Pass* pass, float* transform, uint32_t segments) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   uint32_t key[] = { SHAPE_CONE, segments };
   uint32_t vertexCount = 2 * segments + 1;
   uint32_t indexCount = 3 * (segments - 2) + 3 * segments;
@@ -8845,6 +9163,7 @@ bool lovrPassCone(Pass* pass, float* transform, uint32_t segments) {
 }
 
 bool lovrPassCapsule(Pass* pass, float* transform, uint32_t segments) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(segments >= 2, "Capsule segment count must be >= 2");
   float sx = vec3_length(transform + 0);
   float sy = vec3_length(transform + 4);
@@ -8956,6 +9275,7 @@ bool lovrPassCapsule(Pass* pass, float* transform, uint32_t segments) {
 }
 
 bool lovrPassTorus(Pass* pass, float* transform, uint32_t segmentsT, uint32_t segmentsP) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   float sx = vec3_length(transform + 0);
   float sy = vec3_length(transform + 4);
   float sz = vec3_length(transform + 8);
@@ -9022,6 +9342,7 @@ bool lovrPassTorus(Pass* pass, float* transform, uint32_t segmentsT, uint32_t se
 }
 
 bool lovrPassText(Pass* pass, ColoredString* strings, uint32_t count, float* transform, float wrap, HorizontalAlign halign, VerticalAlign valign) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   Font* font = pass->pipeline->font ? pass->pipeline->font : lovrGraphicsGetDefaultFont();
 
   if (!font) {
@@ -9087,6 +9408,7 @@ bool lovrPassText(Pass* pass, ColoredString* strings, uint32_t count, float* tra
 }
 
 bool lovrPassSkybox(Pass* pass, Texture* texture) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   Material* material = NULL;
 
   if (texture && (material = lovrTextureToMaterial(texture)) == NULL) {
@@ -9103,6 +9425,7 @@ bool lovrPassSkybox(Pass* pass, Texture* texture) {
 }
 
 bool lovrPassFill(Pass* pass, Texture* texture) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   Material* material = NULL;
 
   if (texture && (material = lovrTextureToMaterial(texture)) == NULL) {
@@ -9119,6 +9442,7 @@ bool lovrPassFill(Pass* pass, Texture* texture) {
 }
 
 bool lovrPassMonkey(Pass* pass, float* transform) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   uint32_t key[] = { SHAPE_MONKEY };
   uint32_t vertexCount = COUNTOF(monkey_vertices) / 6;
   ShapeVertex* vertices;
@@ -9161,6 +9485,7 @@ bool lovrPassMonkey(Pass* pass, float* transform) {
 }
 
 bool lovrPassDrawMesh(Pass* pass, Mesh* mesh, float* transform, uint32_t instances) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   uint32_t extent = mesh->indexCount > 0 ? mesh->indexCount : mesh->vertexBuffer->info.format->length;
   uint32_t start = MIN(mesh->drawStart, extent - 1);
   uint32_t count = mesh->drawCount > 0 ? MIN(mesh->drawCount, extent - start) : extent - start;
@@ -9233,6 +9558,7 @@ static bool drawNode(Pass* pass, Model* model, uint32_t index, uint32_t instance
 }
 
 bool lovrPassDrawModel(Pass* pass, Model* model, float* transform, uint32_t instances) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   if (model->meta.nodeCount == 0) {
     return true;
   }
@@ -9254,6 +9580,7 @@ bool lovrPassDrawModel(Pass* pass, Model* model, float* transform, uint32_t inst
 }
 
 bool lovrPassDrawPart(Pass* pass, Model* model, uint32_t meshIndex, uint32_t partIndex, float* transform, uint32_t instances) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(meshIndex < model->meta.meshCount, "Model mesh index %d is out of range", meshIndex + 1);
   lovrCheck(partIndex == ~0u || partIndex < model->meta.meshes[meshIndex].partCount, "Model part index %d is out of range", partIndex + 1);
 
@@ -9312,6 +9639,7 @@ bool lovrPassDrawPart(Pass* pass, Model* model, uint32_t meshIndex, uint32_t par
 }
 
 bool lovrPassDrawTexture(Pass* pass, Texture* texture, float* transform) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   uint32_t key[] = { SHAPE_PLANE, STYLE_FILL, 1, 1 };
   ShapeVertex* vertices;
   uint16_t* indices;
@@ -9356,6 +9684,7 @@ bool lovrPassDrawTexture(Pass* pass, Texture* texture, float* transform) {
 }
 
 bool lovrPassMesh(Pass* pass, Buffer* vertices, Buffer* indices, float* transform, uint32_t start, uint32_t count, uint32_t instances, uint32_t baseVertex) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(!indices || indices->info.format, "Buffer must have been created with a format to use it as a%s buffer", "n index");
   lovrCheck(!vertices || vertices->info.format, "Buffer must have been created with a format to use it as a%s buffer", " vertex");
   lovrCheck(!vertices || vertices->supportsMesh, "Vertex buffer has invalid format (can not contain nested structs/arrays, or matrix/index types)");
@@ -9386,8 +9715,12 @@ bool lovrPassMesh(Pass* pass, Buffer* vertices, Buffer* indices, float* transfor
 }
 
 bool lovrPassMeshIndirect(Pass* pass, Buffer* vertices, Buffer* indices, Buffer* draws, uint32_t count, uint32_t offset, uint32_t stride) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   stride = stride ? stride : (indices ? 20 : 16);
   Shader* shader = pass->pipeline->shader;
+  Material* material = pass->pipeline->material;
+  if (!material) material = state.defaultMaterial;
+  if (!checkMaterialSession(material)) return false;
 
   lovrCheck(shader, "A custom Shader must be bound to source draws from a Buffer");
   lovrCheck(offset % 4 == 0, "Draw Buffer offset must be a multiple of 4");
@@ -9409,18 +9742,17 @@ bool lovrPassMeshIndirect(Pass* pass, Buffer* vertices, Buffer* indices, Buffer*
   }
 
   Draw* previous = pass->drawCount > 0 ? &pass->draws[pass->drawCount - 1] : NULL;
-  Draw* draw = &pass->draws[pass->drawCount++];
+  Draw* draw = &pass->draws[pass->drawCount];
+  memset(draw, 0, sizeof(*draw));
 
   draw->flags = DRAW_INDIRECT;
   draw->tally = pass->tally.active ? pass->tally.count : 0xff;
   draw->camera = pass->cameraCount - 1;
   draw->viewport = pass->viewportCount - 1;
   draw->scissor = pass->scissorCount - 1;
-  pass->flags &= ~DIRTY_CAMERA & ~DIRTY_VIEWPORT & ~DIRTY_SCISSOR;
 
   draw->shader = shader;
-  draw->material = pass->pipeline->material;
-  if (!draw->material) draw->material = state.defaultMaterial;
+  draw->material = material;
   trackMaterial(pass, draw->material);
 
   draw->indirect.buffer = draws->gpu;
@@ -9428,10 +9760,12 @@ bool lovrPassMeshIndirect(Pass* pass, Buffer* vertices, Buffer* indices, Buffer*
   draw->indirect.count = count;
   draw->indirect.stride = stride;
 
+  Pipeline pipeline = *pass->pipeline;
+  uint32_t flags = pass->flags;
   lovrPassResolvePipeline(pass, &info, draw, previous);
   draw->bindings = lovrPassResolveBindings(pass, shader, previous ? previous->bindings : NULL);
-  if (!lovrPassResolveUniforms(pass, draw->shader, &draw->uniformBuffer, &draw->uniformOffset, previous)) return false;
-  if (!lovrPassResolveVertices(pass, &info, draw)) return false;
+  if (!lovrPassResolveUniforms(pass, draw->shader, &draw->uniformBuffer, &draw->uniformOffset, previous)) goto fail;
+  if (!lovrPassResolveVertices(pass, &info, draw)) goto fail;
 
   mat4_init(draw->transform, pass->transform);
   memcpy(draw->color, pass->pipeline->color, 4 * sizeof(float));
@@ -9439,10 +9773,18 @@ bool lovrPassMeshIndirect(Pass* pass, Buffer* vertices, Buffer* indices, Buffer*
   trackBuffer(pass, draws, GPU_PHASE_INDIRECT, GPU_CACHE_INDIRECT);
   lovrRetain(draw->material);
   lovrRetain(shader);
+  pass->drawCount++;
+  pass->flags &= ~DIRTY_CAMERA & ~DIRTY_VIEWPORT & ~DIRTY_SCISSOR;
   return true;
+
+fail:
+  *pass->pipeline = pipeline;
+  pass->flags = flags;
+  return false;
 }
 
 bool lovrPassBeginTally(Pass* pass, uint32_t* index) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(pass->tally.count < MAX_TALLIES, "Pass has too many tallies!");
   lovrCheck(!pass->tally.active, "Trying to start a tally, but the previous tally wasn't finished");
 
@@ -9470,6 +9812,7 @@ bool lovrPassBeginTally(Pass* pass, uint32_t* index) {
 }
 
 bool lovrPassFinishTally(Pass* pass, uint32_t* index) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(pass->tally.active, "Trying to finish a tally, but no tally was started");
   pass->tally.active = false;
   if (index) *index = pass->tally.count++;
@@ -9477,11 +9820,13 @@ bool lovrPassFinishTally(Pass* pass, uint32_t* index) {
 }
 
 Buffer* lovrPassGetTallyBuffer(Pass* pass, uint32_t* offset) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   *offset = pass->tally.bufferOffset;
   return pass->tally.buffer;
 }
 
 bool lovrPassSetTallyBuffer(Pass* pass, Buffer* buffer, uint32_t offset) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   lovrCheck(offset % 4 == 0, "Tally buffer offset must be a multiple of 4");
   lovrRelease(pass->tally.buffer, lovrBufferDestroy);
   pass->tally.buffer = buffer;
@@ -9491,6 +9836,7 @@ bool lovrPassSetTallyBuffer(Pass* pass, Buffer* buffer, uint32_t offset) {
 }
 
 bool lovrPassCompute(Pass* pass, uint32_t x, uint32_t y, uint32_t z, Buffer* indirect, uint32_t offset) {
+  lovrAssert(!pass->sessionDead, "Pass belongs to an invalidated headset session");
   if ((pass->computeCount & (pass->computeCount - 1)) == 0) {
     Compute* computes = lovrPassAllocate(pass, MAX(pass->computeCount << 1, 1) * sizeof(Compute));
     if (pass->computes) memcpy(computes, pass->computes, pass->computeCount * sizeof(Compute));
@@ -9527,6 +9873,7 @@ bool lovrPassCompute(Pass* pass, uint32_t x, uint32_t y, uint32_t z, Buffer* ind
 }
 
 void lovrPassBarrier(Pass* pass) {
+  if (pass->sessionDead) { lovrSetError("Pass belongs to an invalidated headset session"); return; }
   if (pass->computeCount > 0) {
     pass->computes[pass->computeCount - 1].flags |= COMPUTE_BARRIER;
   }

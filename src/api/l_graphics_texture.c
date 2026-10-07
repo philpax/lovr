@@ -1,6 +1,7 @@
 #include "api.h"
 #include "util.h"
 #include "graphics/graphics.h"
+#include "graphics/graphics_session.h"
 #include "data/image.h"
 #include <string.h>
 
@@ -88,6 +89,7 @@ static int l_lovrTextureHasUsage(lua_State* L) {
 
 static int l_lovrTextureNewReadback(lua_State* L) {
   Texture* texture = luax_totype(L, 1, Texture);
+  if (!lovrTextureIsValid(texture)) return luaL_error(L, "Texture belongs to an invalidated headset session");
   uint32_t offset[4], extent[3];
   offset[0] = luax_optu32(L, 2, 0);
   offset[1] = luax_optu32(L, 3, 0);
@@ -127,6 +129,7 @@ static int luax_pushreadbackimage(lua_State* L, bool success, void* readback) {
 
 static int l_lovrTextureGetPixels(lua_State* L) {
   Texture* texture = luax_checktype(L, 1, Texture);
+  if (!lovrTextureIsValid(texture)) return luaL_error(L, "Texture belongs to an invalidated headset session");
   uint32_t offset[4], extent[3];
   offset[0] = luax_optu32(L, 2, 0);
   offset[1] = luax_optu32(L, 3, 0);
@@ -144,6 +147,7 @@ static int l_lovrTextureGetPixels(lua_State* L) {
 
 static int l_lovrTextureSetPixels(lua_State* L) {
   Texture* texture = luax_checktype(L, 1, Texture);
+  if (!lovrTextureIsValid(texture)) return luaL_error(L, "Texture belongs to an invalidated headset session");
 
   Image* image = luax_totype(L, 2, Image);
 
@@ -169,6 +173,7 @@ static int l_lovrTextureSetPixels(lua_State* L) {
   Texture* src = luax_totype(L, 2, Texture);
 
   if (src) {
+    if (!lovrTextureIsValid(src)) return luaL_error(L, "Texture belongs to an invalidated headset session");
     Texture* dst = texture;
     uint32_t dstOffset[4];
     uint32_t srcOffset[4];
@@ -202,6 +207,7 @@ static int l_lovrTextureSetPixels(lua_State* L) {
 
 static int l_lovrTextureClear(lua_State* L) {
   Texture* texture = luax_totype(L, 1, Texture);
+  if (!lovrTextureIsValid(texture)) return luaL_error(L, "Texture belongs to an invalidated headset session");
 
   int index;
   float value[4];
@@ -226,6 +232,7 @@ static int l_lovrTextureClear(lua_State* L) {
 
 static int l_lovrTextureGenerateMipmaps(lua_State* L) {
   Texture* texture = luax_checktype(L, 1, Texture);
+  if (!lovrTextureIsValid(texture)) return luaL_error(L, "Texture belongs to an invalidated headset session");
   uint32_t base = luax_optu32(L, 2, 1) - 1;
   uint32_t count = luax_optu32(L, 3, ~0u);
   luax_assert(L, lovrTextureGenerateMipmaps(texture, base, count));
@@ -241,6 +248,7 @@ static int l_lovrTextureGetSampler(lua_State* L) {
 
 static int l_lovrTextureSetSampler(lua_State* L) {
   Texture* texture = luax_checktype(L, 1, Texture);
+  if (!lovrTextureIsValid(texture)) return luaL_error(L, "Texture belongs to an invalidated headset session");
   switch (lua_type(L, 2)) {
     case LUA_TNONE:
     case LUA_TNIL:

@@ -1,8 +1,9 @@
 #include "headset/headset_ops.h"
+#include "headset/headset_layer.h"
 #include "test.h"
 #include <stdlib.h>
 
-struct Layer { int token; };
+struct Layer { LayerHeader header; int token; };
 
 static struct {
   HeadsetConfig* config;
@@ -32,7 +33,7 @@ static struct {
   uintptr_t vkOutput;
 } fake;
 
-static Layer layer;
+static Layer layer = { .header = { .creator = &lovrHeadsetOpenXROps } };
 
 static void record(char call) {
   if (fake.callCount >= sizeof(fake.calls)) abort();
@@ -49,6 +50,13 @@ static void fakeHeadsetDestroy(void) {
   record('d');
   fake.connected = false;
   fake.active = false;
+}
+
+static bool fakeHeadsetDisconnect(void) {
+  record('x');
+  fake.connected = false;
+  fake.active = false;
+  return true;
 }
 
 static bool fakeHeadsetConnect(void) {
@@ -219,6 +227,7 @@ const HeadsetOps lovrHeadsetOpenXROps = {
   .HeadsetInit = fakeHeadsetInit,
   .HeadsetDestroy = fakeHeadsetDestroy,
   .HeadsetConnect = fakeHeadsetConnect,
+  .HeadsetDisconnect = fakeHeadsetDisconnect,
   .HeadsetIsConnected = fakeHeadsetIsConnected,
   .HeadsetGetName = fakeHeadsetGetName,
   .HeadsetGetDriver = fakeHeadsetGetDriver,
@@ -334,6 +343,11 @@ static bool lifecycle(void) {
   CHECK(memcmp(&config, original, sizeof(config)) == 0);
   CHECK(config.extensions == extensions);
   CHECK(strcmp(extensions, "XR_test_extension") == 0);
+  fake.connected = true;
+  fake.active = true;
+  lovrHeadsetBeforeGraphicsDestroy();
+  CHECK(!fake.connected && !fake.active);
+  CHECK(fake.callCount == 9 && fake.calls[8] == 'x');
   return true;
 }
 
@@ -385,6 +399,23 @@ static bool falseAndNullForwarding(void) {
   return true;
 }
 
+static bool creatorAndGeneration(void) {
+  memset(&fake, 0, sizeof(fake));
+  uint32_t first = lovrHeadsetNextSessionGeneration();
+  uint32_t second = lovrHeadsetNextSessionGeneration();
+  CHECK(first != 0 && second > first);
+  CHECK(!lovrLayerIsValid(NULL));
+  layer.header.generation = 0;
+  CHECK(!lovrLayerIsValid(&layer));
+  HeadsetOps creator = lovrHeadsetOpenXROps;
+  layer.header.creator = &creator;
+  CHECK(!lovrLayerIsValid(&layer));
+  lovrLayerDestroy(&layer);
+  CHECK(fake.destroyed == &layer);
+  layer.header.creator = &lovrHeadsetOpenXROps;
+  return true;
+}
+
 static bool vulkanForwarding(void) {
   memset(&fake, 0, sizeof(fake));
   int instance, info, allocator, proc;
@@ -407,7 +438,8 @@ int main(int argc, char** argv) {
     { "dispatch.lifecycle", lifecycle },
     { "dispatch.features-and-layers", featuresAndLayers },
     { "dispatch.false-and-null-forwarding", falseAndNullForwarding },
-    { "dispatch.vulkan-forwarding", vulkanForwarding }
+    { "dispatch.vulkan-forwarding", vulkanForwarding },
+    { "dispatch.creator-and-generation", creatorAndGeneration }
   };
   return nativeRunTests(argc, argv, tests, sizeof(tests) / sizeof(tests[0]));
 }

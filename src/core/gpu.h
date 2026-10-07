@@ -894,16 +894,20 @@ typedef struct {
     uint32_t (*createInstance)(void* instanceCreateInfo, void* allocator, uintptr_t instance, void* getInstanceProcAddr);
     void (*getPhysicalDevice)(void* instance, uintptr_t physicalDevice);
     uint32_t (*createDevice)(void* instance, void* devceCreateInfo, void* allocator, uintptr_t device, void* getInstanceProcAddr);
+    bool (*beforeDestroy)(void);
     void* cacheData;
     size_t cacheSize;
   } vk;
 } gpu_config;
 
 bool gpu_init(gpu_config* config);
-void gpu_destroy(void);
+bool gpu_destroy(void);
 char* gpu_get_error(void);
 bool gpu_get_memory_info(uint64_t* budget, uint64_t* used);
 bool gpu_submit(gpu_stream** streams, uint32_t count, uint32_t tick);
 bool gpu_is_complete(uint32_t tick);
 bool gpu_wait_tick(uint32_t tick);
 bool gpu_wait_idle(void);
+bool gpu_prepare_teardown(void);
+bool gpu_begin_teardown(void);
+void gpu_flush_deferred_after_idle(void);

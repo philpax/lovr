@@ -2,10 +2,11 @@
 
 #include "headset/headset.h"
 
-typedef struct {
+typedef struct HeadsetOps {
   bool (*HeadsetInit)(HeadsetConfig* config);
   void (*HeadsetDestroy)(void);
   bool (*HeadsetConnect)(void);
+  bool (*HeadsetDisconnect)(void);
   bool (*HeadsetIsConnected)(void);
   const char* (*HeadsetGetName)(void);
   const char* (*HeadsetGetDriver)(void);
@@ -86,3 +87,6 @@ typedef struct {
 } HeadsetOps;
 
 extern const HeadsetOps lovrHeadsetOpenXROps;
+
+bool lovrHeadsetBeforeGraphicsDestroy(void);
+uint32_t lovrHeadsetNextSessionGeneration(void);

@@ -1,13 +1,16 @@
 #include "headset/headset_ops.h"
+#include "headset/headset_layer.h"
 #include "actions.h"
 #include "data/blob.h"
 #include "data/image.h"
 #include "data/modelData.h"
 #include "event/event.h"
 #include "graphics/graphics.h"
+#include "graphics/graphics_session.h"
 #include "math/math.h"
 #include "system/system.h"
 #include "core/maf.h"
+#include "core/gpu.h"
 #include "core/os.h"
 #include "util.h"
 #include <stdatomic.h>
@@ -179,11 +182,14 @@ typedef struct {
   Texture* foveationTextures[MAX_IMAGES];
   bool immutable;
   bool acquired;
+  bool ready;
 } Swapchain;
 
 struct Layer {
-  atomic_uint ref;
-  LayerInfo info;
+  LayerHeader ownership;
+  Layer* previous;
+  Layer* next;
+  bool deferredDestroy;
   Swapchain swapchain;
   Device origin;
   float curve;
@@ -253,6 +259,9 @@ static struct {
   Layer* layers[MAX_LAYERS];
   uint32_t layerCount;
   bool showMainLayer;
+  bool presentationReady;
+  bool backgroundReady;
+  bool stopping;
   Mesh* mask;
   XrFrameState frameState;
   XrTime lastDisplayTime;
@@ -272,6 +281,7 @@ static struct {
   RenderModel* models;
   uint32_t modelCount;
   mtx_t modelLock;
+  bool modelLockInitialized;
   FoveationLevel foveationLevel;
   bool foveationDynamic;
   XrPassthroughFB passthrough;
@@ -340,19 +350,19 @@ static struct {
   } extensions;
 } state;
 
-// The generation of the session in `state`, incremented when one is created.  Outside the struct on
-// purpose: openxrHeadsetDestroy zeroes that, and a counter that restarted with the module would let a
-// session after a restart carry the same number as one before it.
-static uint32_t sessionGeneration;
+static uint32_t currentGeneration;
+static Layer* layerRegistry;
 
 // Helpers
 
 static bool lovrSwapchainInit(Swapchain* swapchain, uint32_t width, uint32_t height, uint32_t flags);
-static void lovrSwapchainDestroy(Swapchain* swapchain);
+static bool lovrSwapchainDestroy(Swapchain* swapchain);
+static bool lovrSwapchainDestroyPrepared(Swapchain* swapchain);
 static Texture* lovrSwapchainAcquire(Swapchain* swapchain);
 static bool lovrSwapchainRelease(Swapchain* swapchain);
 
 static void disconnect(void);
+static bool openxrDisconnect(void);
 static void xrthrow(XrResult result, const char* symbol);
 static XrBool32 onMessage(XrDebugUtilsMessageSeverityFlagsEXT severity, XrDebugUtilsMessageTypeFlagsEXT type, const XrDebugUtilsMessengerCallbackDataEXT* data, void* userdata);
 static bool hasExtension(XrExtensionProperties* extensions, uint32_t count, const char* extension);
@@ -378,6 +388,7 @@ static uint32_t openxrHeadsetGetLayerLimit(void);
 static bool openxrHeadsetIsSeated(void);
 static bool openxrHeadsetStart(void);
 static void openxrHeadsetStop(void);
+static bool openxrStopSession(void);
 static bool openxrHeadsetIsActive(void);
 static uint32_t openxrHeadsetGetSessionGeneration(void);
 static bool openxrHeadsetIsMainSessionVisible(void);
@@ -424,6 +435,9 @@ static void openxrHeadsetSetPose(Device device, float* position, float* orientat
 static void openxrHeadsetSetButton(Device device, DeviceButton button, bool down);
 static Layer* openxrLayerCreate(const LayerInfo* info);
 static void openxrLayerDestroy(void* ref);
+static bool openxrLayerIsCurrent(Layer* layer);
+static bool openxrLayerInvalidate(Layer* layer);
+static bool openxrLayerInvalidatePrepared(Layer* layer);
 static Device openxrLayerGetOrigin(Layer* layer);
 static void openxrLayerSetOrigin(Layer* layer, Device device);
 static void openxrLayerGetPose(Layer* layer, float* position, float* orientation);
@@ -476,8 +490,13 @@ static bool openxrHeadsetInit(HeadsetConfig* config) {
 }
 
 static void openxrHeadsetDestroy(void) {
+  unsigned previousRef = atomic_load(&ref);
   if (!lovrModuleRelease(&ref)) return;
-  disconnect();
+  if (!openxrDisconnect()) {
+    if (atomic_load(&ref) != previousRef) atomic_fetch_add(&ref, 1);
+    lovrLog(LOG_ERROR, "XR", "Headset destruction deferred: %s", lovrGetError());
+    return;
+  }
   lovrFree(state.config.extensions);
   Simulator simulator = state.simulator; // Keep simulator state between restarts, for convenience
   memset(&state, 0, sizeof(state));
@@ -1155,10 +1174,8 @@ static bool openxrHeadsetStart(void) {
 
     XR(xrCreateSession(state.instance, &info, &state.session), "xrCreateSession");
 
-    // Skipping zero on wrap keeps it the answer for "there is no session" alone.  A start that
-    // fails below leaves the number spent rather than reusing it, which is the point: the session
-    // it belonged to existed, however briefly.
-    if (++sessionGeneration == 0) sessionGeneration = 1;
+    currentGeneration = lovrHeadsetNextSessionGeneration();
+    if (!currentGeneration) goto stop;
 
     XRG(xrAttachSessionActionSets(state.session, &attachInfo), "xrAttachSessionActionSets", stop);
 
@@ -1229,7 +1246,7 @@ static bool openxrHeadsetStart(void) {
 
     state.pass = lovrPassCreate("Headset");
 
-    if (!state.pass) {
+    if (!state.pass || !lovrGraphicsRegisterSessionPass(state.pass)) {
       goto stop;
     }
 
@@ -1340,7 +1357,8 @@ static bool openxrHeadsetStart(void) {
   }
 
   if (state.extensions.renderModel) {
-    mtx_init(&state.modelLock, mtx_plain);
+    lovrAssertGoto(stop, mtx_init(&state.modelLock, mtx_plain) == thrd_success, "Could not initialize render model lock");
+    state.modelLockInitialized = true;
   }
 
   if (state.extensions.bodyTracking) {
@@ -1364,13 +1382,23 @@ stop:
 }
 
 static void openxrHeadsetStop(void) {
+  openxrStopSession();
+}
+
+static bool openxrStopSession(void) {
+  if (!lovrGraphicsPrepareSessionTeardown()) return false;
+  lovrRelease(state.simulator.texture, lovrTextureDestroy);
+  lovrRelease(state.simulator.pass, lovrPassDestroy);
+  state.simulator.texture = NULL;
+  state.simulator.pass = NULL;
   if (!state.session) {
-    lovrRelease(state.simulator.texture, lovrTextureDestroy);
-    lovrRelease(state.simulator.pass, lovrPassDestroy);
-    state.simulator.texture = NULL;
-    state.simulator.pass = NULL;
-    return;
+    state.stopping = false;
+    return true;
   }
+  currentGeneration = 0;
+  state.stopping = true;
+  state.backgroundReady = false;
+  state.presentationReady = false;
 
   state.began = false;
   state.waited = false;
@@ -1385,56 +1413,81 @@ static void openxrHeadsetStop(void) {
   state.refreshRateCount = 0;
   state.refreshRates = NULL;
 
+  for (Layer* layer = layerRegistry; layer;) {
+    Layer* next = layer->next;
+    if (!openxrLayerInvalidatePrepared(layer)) return false;
+    if (layer->deferredDestroy) lovrRelease(layer, openxrLayerDestroy);
+    layer = next;
+  }
+
   for (uint32_t i = 0; i < state.layerCount; i++) {
     lovrRelease(state.layers[i], openxrLayerDestroy);
     state.layers[i] = NULL;
   }
   state.layerCount = 0;
 
-  lovrSwapchainDestroy(&state.swapchains[0]);
-  lovrSwapchainDestroy(&state.swapchains[1]);
   lovrRelease(state.pass, lovrPassDestroy);
   state.pass = NULL;
+  if (!lovrSwapchainDestroyPrepared(&state.swapchains[0])) return false;
+  if (!lovrSwapchainDestroyPrepared(&state.swapchains[1])) return false;
+  if (!lovrSwapchainDestroyPrepared(&state.swapchains[2])) return false;
 
   lovrRelease(state.mask, lovrMeshDestroy);
   state.mask = NULL;
 
   if (state.extensions.renderModel) {
-    mtx_destroy(&state.modelLock);
     for (uint32_t i = 0; i < state.modelCount; i++) {
-      if (state.models[i].handle) xrDestroyRenderModelEXT(state.models[i].handle);
-      if (state.models[i].space) xrDestroySpace(state.models[i].space);
+      if (state.models[i].handle) XR(xrDestroyRenderModelEXT(state.models[i].handle), "xrDestroyRenderModelEXT");
+      state.models[i].handle = XR_NULL_HANDLE;
+      if (state.models[i].space) XR(xrDestroySpace(state.models[i].space), "xrDestroySpace");
+      state.models[i].space = XR_NULL_HANDLE;
       lovrFree(state.models[i].nodeStates);
       lovrFree(state.models[i].nodes);
+      state.models[i].nodeStates = NULL;
+      state.models[i].nodes = NULL;
     }
   }
+  if (state.modelLockInitialized) mtx_destroy(&state.modelLock);
+  state.modelLockInitialized = false;
   lovrFree(state.modelKeys);
   lovrFree(state.models);
   state.modelKeys = NULL;
   state.models = NULL;
+  state.modelCount = 0;
 
-  if (state.handTrackers[0]) xrDestroyHandTrackerEXT(state.handTrackers[0]);
-  if (state.handTrackers[1]) xrDestroyHandTrackerEXT(state.handTrackers[1]);
+  if (state.handTrackers[0]) XR(xrDestroyHandTrackerEXT(state.handTrackers[0]), "xrDestroyHandTrackerEXT");
+  state.handTrackers[0] = XR_NULL_HANDLE;
+  if (state.handTrackers[1]) XR(xrDestroyHandTrackerEXT(state.handTrackers[1]), "xrDestroyHandTrackerEXT");
+  state.handTrackers[1] = XR_NULL_HANDLE;
 
-  if (state.bodyTracker) xrDestroyBodyTrackerBD(state.bodyTracker);
+  if (state.bodyTracker) XR(xrDestroyBodyTrackerBD(state.bodyTracker), "xrDestroyBodyTrackerBD");
+  state.bodyTracker = XR_NULL_HANDLE;
 
-  if (state.passthrough) xrDestroyPassthroughFB(state.passthrough);
-  if (state.passthroughLayerHandle) xrDestroyPassthroughLayerFB(state.passthroughLayerHandle);
+  if (state.passthroughLayerHandle) XR(xrDestroyPassthroughLayerFB(state.passthroughLayerHandle), "xrDestroyPassthroughLayerFB");
+  state.passthroughLayerHandle = XR_NULL_HANDLE;
+  if (state.passthrough) XR(xrDestroyPassthroughFB(state.passthrough), "xrDestroyPassthroughFB");
+  state.passthrough = XR_NULL_HANDLE;
   state.passthroughActive = false;
 
   for (size_t i = 0; i < MAX_DEVICES; i++) {
     if (state.spaces[i]) {
-      xrDestroySpace(state.spaces[i]);
+      XR(xrDestroySpace(state.spaces[i]), "xrDestroySpace");
       state.spaces[i] = XR_NULL_HANDLE;
     }
   }
 
-  if (state.referenceSpace) xrDestroySpace(state.referenceSpace);
+  if (state.referenceSpace) XR(xrDestroySpace(state.referenceSpace), "xrDestroySpace");
   state.referenceSpace = XR_NULL_HANDLE;
 
-  if (state.session) xrDestroySession(state.session);
+  if (state.session) XR(xrDestroySession(state.session), "xrDestroySession");
   state.sessionState = XR_SESSION_STATE_UNKNOWN;
   state.session = XR_NULL_HANDLE;
+  state.hdr = false;
+  state.mainSessionVisible = false;
+  memset(state.handSpaces, 0, sizeof(state.handSpaces));
+  currentGeneration = 0;
+  state.stopping = false;
+  return true;
 }
 
 static bool openxrHeadsetIsActive(void) {
@@ -1446,7 +1499,7 @@ static bool openxrHeadsetIsActive(void) {
 // one has been started since".  openxrHeadsetIsActive cannot answer that: a stop and a start in the
 // same frame read as active both before and after, while every swapchain in between was destroyed.
 static uint32_t openxrHeadsetGetSessionGeneration(void) {
-  return state.session ? sessionGeneration : 0;
+  return state.session ? currentGeneration : 0;
 }
 
 // Whether an application other than this one is presenting, which only an overlay session can be
@@ -1473,6 +1526,7 @@ static bool openxrHeadsetIsMounted(void) {
 }
 
 static bool openxrHeadsetPollEvents(void) {
+  lovrAssert(!state.stopping, "Headset session teardown is pending");
   if (!state.session) return true;
 
   XrEventDataBuffer e; // Not using designated initializers here to avoid an implicit 4k zero
@@ -1580,6 +1634,7 @@ static bool openxrHeadsetPollEvents(void) {
 }
 
 static bool openxrHeadsetUpdate(void) {
+  lovrAssert(!state.stopping, "Headset session teardown is pending");
   if (!state.session) {
     memcpy(state.simulator.lastButtons, state.simulator.buttons, sizeof(state.simulator.buttons));
     return true;
@@ -2714,6 +2769,8 @@ static ModelData* newModelDataFB(uint64_t key) {
 }
 
 static ModelData* openxrHeadsetNewModelData(uint64_t key) {
+  lovrAssert(state.session && !state.stopping && (!state.extensions.renderModel || state.modelLockInitialized),
+    "Headset model session is unavailable");
   if (state.extensions.renderModel) {
     return newModelDataEXT(key);
   } else if (state.extensions.handTrackingMesh) {
@@ -2724,6 +2781,8 @@ static ModelData* openxrHeadsetNewModelData(uint64_t key) {
 }
 
 static bool openxrHeadsetGetModelPose(Model* model, float* position, float* orientation) {
+  lovrAssert(state.session && !state.stopping && (!state.extensions.renderModel || state.modelLockInitialized),
+    "Headset model session is unavailable");
   if (state.extensions.renderModel) {
     uint64_t key = lovrModelGetMetadata(model)->id;
 
@@ -2884,6 +2943,8 @@ static bool animateFB(Model* model) {
 }
 
 static bool openxrHeadsetAnimate(Model* model) {
+  lovrAssert(state.session && !state.stopping && (!state.extensions.renderModel || state.modelLockInitialized),
+    "Headset model session is unavailable");
   if (state.extensions.renderModel) {
     return animateEXT(model);
   } else if (state.extensions.handTrackingMesh) {
@@ -2894,24 +2955,32 @@ static bool openxrHeadsetAnimate(Model* model) {
 }
 
 static Texture* openxrHeadsetSetBackground(uint32_t width, uint32_t height, uint32_t layers) {
+  lovrAssert(!state.stopping, "Headset session teardown is pending");
+  if (!gpu_prepare_teardown()) return NULL;
+  state.backgroundReady = false;
+  memset(&state.background, 0, sizeof(state.background));
   Swapchain* swapchain = &state.swapchains[SWAPCHAIN_BACKGROUND];
 
   if (width == 0 && height == 0) {
-    lovrSwapchainDestroy(swapchain);
+    if (!lovrSwapchainDestroy(swapchain)) return NULL;
     memset(swapchain, 0, sizeof(Swapchain));
+    memset(&state.background, 0, sizeof(state.background));
     return NULL;
   }
 
   lovrCheck(state.extensions.layerCube || layers != 6, "This headset does not support cubemap backgrounds");
   lovrCheck(state.extensions.layerEquirect || state.extensions.layerEquirect2 || layers != 1, "This headset does not support equirectangular backgrounds");
 
+  if (!lovrSwapchainDestroy(swapchain)) return NULL;
+  memset(&state.background, 0, sizeof(state.background));
   if (!lovrSwapchainInit(swapchain, width, height, STATIC | (layers == 6 ? CUBE : 0))) {
     return NULL;
   }
 
   if (!lovrSwapchainAcquire(swapchain)) {
-    lovrSwapchainDestroy(swapchain);
+    if (!lovrSwapchainDestroy(swapchain)) return NULL;
     memset(swapchain, 0, sizeof(Swapchain));
+    memset(&state.background, 0, sizeof(state.background));
     return NULL;
   }
 
@@ -2942,6 +3011,7 @@ static Texture* openxrHeadsetSetBackground(uint32_t width, uint32_t height, uint
     };
   }
 
+  state.backgroundReady = true;
   return state.swapchains[SWAPCHAIN_BACKGROUND].textures[0];
 }
 
@@ -2952,24 +3022,31 @@ static Layer** openxrHeadsetGetLayers(uint32_t* count, bool* main) {
 }
 
 static bool openxrHeadsetSetLayers(Layer** layers, uint32_t count, bool main) {
+  lovrAssert(count <= MAX_LAYERS, "Too many layers");
+  lovrAssert(count == 0 || layers, "Layer list must not be null");
   uint32_t total = 0;
+  Layer* replacement[MAX_LAYERS];
 
   for (uint32_t i = 0; i < count; i++) {
-    total += layers[i]->info.stereo ? 2 : 1;
+    lovrAssert(openxrLayerIsCurrent(layers[i]), "Layer belongs to an inactive headset session");
+    total += layers[i]->ownership.info.stereo ? 2 : 1;
+    replacement[i] = layers[i];
   }
 
-  // This counts a stereo layer as the 2 composition layers it submits, whereas the check in
-  // l_lovrHeadsetSetLayers counts Layer objects.  The two disagree, and this is the one that binds.
-  lovrCheck(total <= MAX_LAYERS, "Too many layers");
+  lovrAssert(total <= MAX_LAYERS, "Too many layers");
+
+  for (uint32_t i = 0; i < count; i++) {
+    lovrRetain(replacement[i]);
+  }
 
   for (uint32_t i = 0; i < state.layerCount; i++) {
     lovrRelease(state.layers[i], openxrLayerDestroy);
+    state.layers[i] = NULL;
   }
 
   state.layerCount = count;
   for (uint32_t i = 0; i < count; i++) {
-    lovrRetain(layers[i]);
-    state.layers[i] = layers[i];
+    state.layers[i] = replacement[i];
   }
 
   state.showMainLayer = main;
@@ -2978,6 +3055,7 @@ static bool openxrHeadsetSetLayers(Layer** layers, uint32_t count, bool main) {
 }
 
 static bool openxrHeadsetGetTexture(Texture** texture) {
+  lovrAssert(!state.session || state.presentationReady, "Headset presentation requires swapchain reconstruction");
   if (!state.session) {
     uint32_t width, height;
     openxrHeadsetGetDisplayDimensions(&width, &height);
@@ -2990,6 +3068,12 @@ static bool openxrHeadsetGetTexture(Texture** texture) {
     const TextureInfo* info = state.simulator.texture ? lovrTextureGetInfo(state.simulator.texture) : NULL;
 
     if (!info || info->width != width || info->height != height) {
+      if (!gpu_prepare_teardown()) return false;
+      lovrGraphicsInvalidateSessionTexture(state.simulator.texture);
+      lovrGraphicsInvalidateSessionPass(state.simulator.pass);
+      gpu_flush_deferred_after_idle();
+      lovrRelease(state.simulator.pass, lovrPassDestroy);
+      state.simulator.pass = NULL;
       lovrRelease(state.simulator.texture, lovrTextureDestroy);
 
       state.simulator.texture = lovrTextureCreate(&(TextureInfo) {
@@ -3005,7 +3089,9 @@ static bool openxrHeadsetGetTexture(Texture** texture) {
         .label = "Simulator"
       });
 
-      if (!state.simulator.texture) {
+      if (!state.simulator.texture || !lovrGraphicsRegisterSessionTexture(state.simulator.texture)) {
+        lovrRelease(state.simulator.texture, lovrTextureDestroy);
+        state.simulator.texture = NULL;
         return false;
       }
     }
@@ -3035,6 +3121,7 @@ static bool openxrHeadsetGetTexture(Texture** texture) {
 }
 
 static bool openxrHeadsetGetDepthTexture(Texture** texture) {
+  lovrAssert(!state.session || state.presentationReady, "Headset presentation requires swapchain reconstruction");
   if (!SESSION_RUNNING(state.sessionState) || !state.extensions.depth) {
     *texture = NULL;
     return true;
@@ -3056,6 +3143,7 @@ static bool openxrHeadsetGetDepthTexture(Texture** texture) {
 }
 
 static bool openxrHeadsetGetPass(Pass** pass) {
+  lovrAssert(!state.session || state.presentationReady, "Headset presentation requires swapchain reconstruction");
   if (!state.session) {
     Texture* texture;
     if (!openxrHeadsetGetTexture(&texture)) {
@@ -3069,6 +3157,11 @@ static bool openxrHeadsetGetPass(Pass** pass) {
 
     if (!state.simulator.pass) {
       if ((state.simulator.pass = lovrPassCreate("Simulator")) == NULL) {
+        return false;
+      }
+      if (!lovrGraphicsRegisterSessionPass(state.simulator.pass)) {
+        lovrRelease(state.simulator.pass, lovrPassDestroy);
+        state.simulator.pass = NULL;
         return false;
       }
 
@@ -3193,6 +3286,7 @@ static bool openxrHeadsetGetPass(Pass** pass) {
 }
 
 static bool openxrHeadsetSubmit(void) {
+  lovrAssert(!state.session || state.presentationReady, "Headset presentation requires swapchain reconstruction");
   if (!SESSION_RUNNING(state.sessionState)) {
     state.waited = false;
     return true;
@@ -3225,8 +3319,8 @@ static bool openxrHeadsetSubmit(void) {
   };
 
   if (state.frameState.shouldRender) {
-    lovrSwapchainRelease(&state.swapchains[SWAPCHAIN_COLOR]);
-    lovrSwapchainRelease(&state.swapchains[SWAPCHAIN_DEPTH]);
+    if (!lovrSwapchainRelease(&state.swapchains[SWAPCHAIN_COLOR])) return false;
+    if (!lovrSwapchainRelease(&state.swapchains[SWAPCHAIN_DEPTH])) return false;
 
     // Passthrough layer
     if (state.passthroughActive) {
@@ -3234,10 +3328,10 @@ static bool openxrHeadsetSubmit(void) {
     }
 
     // Background layer
-    if (state.swapchains[SWAPCHAIN_BACKGROUND].handle) {
+    if (state.backgroundReady && state.swapchains[SWAPCHAIN_BACKGROUND].handle) {
       layers[info.layerCount++] = (const XrCompositionLayerBaseHeader*) &state.background.header;
       state.background.header.space = state.referenceSpace;
-      lovrSwapchainRelease(&state.swapchains[SWAPCHAIN_BACKGROUND]);
+      if (!lovrSwapchainRelease(&state.swapchains[SWAPCHAIN_BACKGROUND])) return false;
     }
 
     // Main layer
@@ -3278,11 +3372,11 @@ static bool openxrHeadsetSubmit(void) {
 
       layers[info.layerCount++] = (const XrCompositionLayerBaseHeader*) &layer->header;
       layer->header.space = layer->origin >= MAX_DEVICES ? state.referenceSpace : state.spaces[layer->origin];
-      lovrSwapchainRelease(&layer->swapchain);
+      if (!lovrSwapchainRelease(&layer->swapchain)) return false;
 
       // Stereo layers require 2 composition layers (gr?).  We make a temporary copy of the layer's
       // data and change it to show up in the right eye with the second texture array layer.
-      if (layer->info.stereo) {
+      if (layer->ownership.info.stereo) {
         layers[info.layerCount++] = (const XrCompositionLayerBaseHeader*) &stereoLayers[i];
 
         if (layer->curve == 0.f) {
@@ -3317,11 +3411,17 @@ static void openxrHeadsetSetButton(Device device, DeviceButton button, bool down
 // Layer
 
 static Layer* openxrLayerCreate(const LayerInfo* info) {
-  lovrAssert(state.session, "A headset session must be active to create a Layer");
+  lovrAssert(state.session && !state.stopping && currentGeneration,
+    "A headset session must be active to create a Layer");
 
   Layer* layer = lovrCalloc(sizeof(Layer));
-  layer->ref = 1;
-  layer->info = *info;
+  layer->ownership.ref = 1;
+  layer->ownership.info = *info;
+  layer->ownership.creator = &lovrHeadsetOpenXROps;
+  layer->ownership.generation = currentGeneration;
+  layer->next = layerRegistry;
+  if (layerRegistry) layerRegistry->previous = layer;
+  layerRegistry = layer;
   layer->origin = ~0u;
 
   uint32_t flags = (info->stereo ? STEREO : 0) | (info->immutable ? STATIC : 0);
@@ -3380,20 +3480,60 @@ static Layer* openxrLayerCreate(const LayerInfo* info) {
 
 static void openxrLayerDestroy(void* ref) {
   Layer* layer = ref;
-  lovrSwapchainDestroy(&layer->swapchain);
-  lovrRelease(layer->pass, lovrPassDestroy);
+  if (!openxrLayerInvalidate(layer)) {
+    if (atomic_load(&layer->ownership.ref) == 0) atomic_fetch_add(&layer->ownership.ref, 1);
+    layer->deferredDestroy = true;
+    lovrLog(LOG_ERROR, "XR", "Layer destruction deferred: %s", lovrGetError());
+    return;
+  }
+  if (layer->previous) layer->previous->next = layer->next;
+  else layerRegistry = layer->next;
+  if (layer->next) layer->next->previous = layer->previous;
   lovrFree(layer);
 }
 
+static bool openxrLayerIsCurrent(Layer* layer) {
+  return layer && layer->ownership.creator == &lovrHeadsetOpenXROps && state.session &&
+    !state.stopping && currentGeneration &&
+    layer->ownership.generation == currentGeneration && layer->swapchain.handle && layer->swapchain.textureCount;
+}
+
+static bool openxrLayerInvalidate(Layer* layer) {
+  if (layer->swapchain.handle || layer->pass) {
+    if (!gpu_prepare_teardown()) return false;
+  }
+  return openxrLayerInvalidatePrepared(layer);
+}
+
+static bool openxrLayerInvalidatePrepared(Layer* layer) {
+  lovrGraphicsInvalidateSessionPass(layer->pass);
+  lovrRelease(layer->pass, lovrPassDestroy);
+  layer->pass = NULL;
+  gpu_flush_deferred_after_idle();
+  return lovrSwapchainDestroyPrepared(&layer->swapchain);
+}
+
 static Device openxrLayerGetOrigin(Layer* layer) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return ~0u;
+  }
   return layer->origin;
 }
 
 static void openxrLayerSetOrigin(Layer* layer, Device device) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return;
+  }
   layer->origin = device;
 }
 
 static void openxrLayerGetPose(Layer* layer, float* position, float* orientation) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return;
+  }
   if (layer->curve == 0.f) {
     memcpy(position, &layer->quad.pose.position.x, 3 * sizeof(float));
     memcpy(orientation, &layer->quad.pose.orientation.x, 4 * sizeof(float));
@@ -3408,6 +3548,10 @@ static void openxrLayerGetPose(Layer* layer, float* position, float* orientation
 }
 
 static void openxrLayerSetPose(Layer* layer, float* position, float* orientation) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return;
+  }
   if (layer->curve == 0.f) {
     memcpy(&layer->quad.pose.position.x, position, 3 * sizeof(float));
     memcpy(&layer->quad.pose.orientation.x, orientation, 4 * sizeof(float));
@@ -3422,6 +3566,10 @@ static void openxrLayerSetPose(Layer* layer, float* position, float* orientation
 }
 
 static void openxrLayerGetDimensions(Layer* layer, float* width, float* height) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return;
+  }
   if (layer->curve == 0.f) {
     *width = layer->quad.size.width;
     *height = layer->quad.size.height;
@@ -3432,6 +3580,10 @@ static void openxrLayerGetDimensions(Layer* layer, float* width, float* height) 
 }
 
 static void openxrLayerSetDimensions(Layer* layer, float width, float height) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return;
+  }
   if (layer->curve == 0.f) {
     layer->quad.size.width = width;
     layer->quad.size.height = height;
@@ -3442,10 +3594,18 @@ static void openxrLayerSetDimensions(Layer* layer, float width, float height) {
 }
 
 static float openxrLayerGetCurve(Layer* layer) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return 0.f;
+  }
   return layer->curve;
 }
 
 static bool openxrLayerSetCurve(Layer* layer, float curve) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return false;
+  }
   if (!state.extensions.layerCurve) return true;
   if (curve < 1e-3) curve = 0.f;
 
@@ -3489,6 +3649,10 @@ static bool openxrLayerSetCurve(Layer* layer, float curve) {
 }
 
 static void openxrLayerGetColor(Layer* layer, float color[4]) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return;
+  }
   color[0] = lovrMathLinearToGamma(layer->color.colorScale.r);
   color[1] = lovrMathLinearToGamma(layer->color.colorScale.g);
   color[2] = lovrMathLinearToGamma(layer->color.colorScale.b);
@@ -3496,6 +3660,10 @@ static void openxrLayerGetColor(Layer* layer, float color[4]) {
 }
 
 static void openxrLayerSetColor(Layer* layer, float color[4]) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return;
+  }
   layer->color.colorScale.r = lovrMathGammaToLinear(color[0]);
   layer->color.colorScale.g = lovrMathGammaToLinear(color[1]);
   layer->color.colorScale.b = lovrMathGammaToLinear(color[2]);
@@ -3503,6 +3671,10 @@ static void openxrLayerSetColor(Layer* layer, float color[4]) {
 }
 
 static void openxrLayerGetViewport(Layer* layer, int32_t* viewport) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return;
+  }
   viewport[0] = layer->quad.subImage.imageRect.offset.x;
   viewport[1] = layer->quad.subImage.imageRect.offset.y;
   viewport[2] = layer->quad.subImage.imageRect.extent.width;
@@ -3510,23 +3682,40 @@ static void openxrLayerGetViewport(Layer* layer, int32_t* viewport) {
 }
 
 static void openxrLayerSetViewport(Layer* layer, int32_t* viewport) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return;
+  }
   XrSwapchainSubImage* subimage = layer->curve == 0.f ? &layer->quad.subImage : &layer->cylinder.subImage;
   subimage->imageRect.offset.x = viewport[0];
   subimage->imageRect.offset.y = viewport[1];
-  subimage->imageRect.extent.width = viewport[2] ? viewport[2] : layer->info.width - viewport[0];
-  subimage->imageRect.extent.height = viewport[3] ? viewport[3] : layer->info.height - viewport[1];
+  subimage->imageRect.extent.width = viewport[2] ? viewport[2] : layer->ownership.info.width - viewport[0];
+  subimage->imageRect.extent.height = viewport[3] ? viewport[3] : layer->ownership.info.height - viewport[1];
 }
 
 static Texture* openxrLayerGetTexture(Layer* layer) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return NULL;
+  }
   return lovrSwapchainAcquire(&layer->swapchain);
 }
 
 static Pass* openxrLayerGetPass(Layer* layer) {
+  if (!openxrLayerIsCurrent(layer)) {
+    lovrSetError("Layer belongs to an inactive headset session");
+    return NULL;
+  }
   Texture* texture = openxrLayerGetTexture(layer);
   if (!texture) return NULL;
 
   if (!layer->pass) {
     if ((layer->pass = lovrPassCreate(NULL)) == NULL) {
+      return NULL;
+    }
+    if (!lovrGraphicsRegisterSessionPass(layer->pass)) {
+      lovrRelease(layer->pass, lovrPassDestroy);
+      layer->pass = NULL;
       return NULL;
     }
 
@@ -3547,9 +3736,9 @@ static Pass* openxrLayerGetPass(Layer* layer) {
 
   float viewMatrix[16] = MAT4_IDENTITY;
   float projection[16];
-  mat4_orthographic(projection, 0, layer->info.width, 0, layer->info.height, -1.f, 1.f);
+  mat4_orthographic(projection, 0, layer->ownership.info.width, 0, layer->ownership.info.height, -1.f, 1.f);
 
-  for (uint32_t i = 0; i < 1u << layer->info.stereo; i++) {
+  for (uint32_t i = 0; i < 1u << layer->ownership.info.stereo; i++) {
     lovrPassSetViewMatrix(layer->pass, i, viewMatrix);
     lovrPassSetProjection(layer->pass, i, projection);
   }
@@ -3701,9 +3890,15 @@ static bool lovrSwapchainInit(Swapchain* swapchain, uint32_t width, uint32_t hei
 #endif
 
   uint32_t textureCount = 0;
-  XR(xrEnumerateSwapchainImages(swapchain->handle, MAX_IMAGES, &textureCount, (XrSwapchainImageBaseHeader*) images), "xrEnumerateSwapchainImages");
+  XrResult result = xrEnumerateSwapchainImages(swapchain->handle, MAX_IMAGES, &textureCount, (XrSwapchainImageBaseHeader*) images);
+  if (XR_FAILED(result) || textureCount > MAX_IMAGES) {
+    lovrSwapchainDestroy(swapchain);
+    xrthrow(XR_FAILED(result) ? result : XR_ERROR_SIZE_INSUFFICIENT, "xrEnumerateSwapchainImages");
+    return false;
+  }
 
-  for (uint32_t i = 0; i < textureCount; i++, swapchain->textureCount++) {
+  for (uint32_t i = 0; i < textureCount; i++) {
+    swapchain->textureCount = i + 1;
     swapchain->textures[i] = lovrTextureCreate(&(TextureInfo) {
       .type = cube ? TEXTURE_CUBE : (stereo || view ? TEXTURE_ARRAY : TEXTURE_2D),
       .format = depth ? state.depthFormat : hdr ? FORMAT_RGB10A2 : FORMAT_RGBA8,
@@ -3717,7 +3912,7 @@ static bool lovrSwapchainInit(Swapchain* swapchain, uint32_t width, uint32_t hei
       .xr = true
     });
 
-    if (!swapchain->textures[i]) {
+    if (!swapchain->textures[i] || !lovrGraphicsRegisterSessionTexture(swapchain->textures[i])) {
       lovrSwapchainDestroy(swapchain);
       return false;
     }
@@ -3734,6 +3929,10 @@ static bool lovrSwapchainInit(Swapchain* swapchain, uint32_t width, uint32_t hei
         .handle = (uintptr_t) foveationImages[i].image,
         .label = "OpenXR Foveation Texture"
       });
+      if (!swapchain->foveationTextures[i] || !lovrGraphicsRegisterSessionTexture(swapchain->foveationTextures[i])) {
+        lovrSwapchainDestroy(swapchain);
+        return false;
+      }
     }
 #endif
   }
@@ -3743,14 +3942,31 @@ static bool lovrSwapchainInit(Swapchain* swapchain, uint32_t width, uint32_t hei
   return true;
 }
 
-static void lovrSwapchainDestroy(Swapchain* swapchain) {
-  if (!swapchain->handle) return;
+static bool lovrSwapchainDestroy(Swapchain* swapchain) {
+  if (!swapchain->handle) return true;
+  if (!gpu_prepare_teardown()) return false;
+  return lovrSwapchainDestroyPrepared(swapchain);
+}
+
+static bool lovrSwapchainDestroyPrepared(Swapchain* swapchain) {
+  if (!swapchain->handle) return true;
+  for (uint32_t i = 0; i < swapchain->textureCount; i++) {
+    lovrGraphicsInvalidateSessionTexture(swapchain->textures[i]);
+    lovrGraphicsInvalidateSessionTexture(swapchain->foveationTextures[i]);
+  }
+  gpu_flush_deferred_after_idle();
   for (uint32_t i = 0; i < swapchain->textureCount; i++) {
     lovrRelease(swapchain->textures[i], lovrTextureDestroy);
+    lovrRelease(swapchain->foveationTextures[i], lovrTextureDestroy);
+    swapchain->textures[i] = NULL;
+    swapchain->foveationTextures[i] = NULL;
   }
   swapchain->textureCount = 0;
-  xrDestroySwapchain(swapchain->handle);
+  swapchain->acquired = false;
+  swapchain->ready = false;
+  XR(xrDestroySwapchain(swapchain->handle), "xrDestroySwapchain");
   swapchain->handle = XR_NULL_HANDLE;
+  return true;
 }
 
 static Texture* lovrSwapchainAcquire(Swapchain* swapchain) {
@@ -3760,41 +3976,54 @@ static Texture* lovrSwapchainAcquire(Swapchain* swapchain) {
       return NULL;
     }
 
-    XrSwapchainImageWaitInfo waitInfo = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, .timeout = XR_INFINITE_DURATION };
     XR(xrAcquireSwapchainImage(swapchain->handle, NULL, &swapchain->textureIndex), "xrAcquireSwapchainImage");
 
-    for (;;) {
-      XrResult result = xrWaitSwapchainImage(swapchain->handle, &waitInfo);
-      if (XR_FAILED(result)) {
-        lovrLog(LOG_WARN, "XR", "OpenXR failed to wait on swapchain image (%d)", result);
-      } else {
-        swapchain->acquired = true;
-        break;
-      }
-    }
+    swapchain->acquired = true;
   }
 
+  if (!swapchain->ready) {
+    XrSwapchainImageWaitInfo waitInfo = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, .timeout = XR_INFINITE_DURATION };
+    XrResult result = xrWaitSwapchainImage(swapchain->handle, &waitInfo);
+    if (result != XR_SUCCESS) {
+      xrthrow(result, "xrWaitSwapchainImage");
+      return NULL;
+    }
+    swapchain->ready = true;
+  }
+
+  lovrAssert(swapchain->textureIndex < swapchain->textureCount, "Invalid swapchain image index");
   return swapchain->textures[swapchain->textureIndex];
 }
 
 static bool lovrSwapchainRelease(Swapchain* swapchain) {
   if (swapchain->handle && swapchain->acquired) {
+    lovrAssert(swapchain->ready, "Swapchain image wait has not completed");
     XR(xrReleaseSwapchainImage(swapchain->handle, NULL), "xrReleaseSwapchainImage");
     swapchain->textureIndex = ~0u; // Mark as released, for immutable swapchains >.>
     swapchain->acquired = false;
+    swapchain->ready = false;
   }
   return true;
 }
 
 static void disconnect(void) {
-  openxrHeadsetStop();
-  if (state.actionSet) xrDestroyActionSet(state.actionSet);
-  if (state.messenger) xrDestroyDebugUtilsMessengerEXT(state.messenger);
-  if (state.instance) xrDestroyInstance(state.instance);
-  state.actionSet = XR_NULL_HANDLE;
-  state.messenger = XR_NULL_HANDLE;
+  openxrDisconnect();
+}
+
+static bool openxrDisconnect(void) {
+  if (!openxrStopSession()) return false;
+  if (state.actionSet) {
+    XR(xrDestroyActionSet(state.actionSet), "xrDestroyActionSet");
+    state.actionSet = XR_NULL_HANDLE;
+  }
+  if (state.messenger) {
+    XR(xrDestroyDebugUtilsMessengerEXT(state.messenger), "xrDestroyDebugUtilsMessengerEXT");
+    state.messenger = XR_NULL_HANDLE;
+  }
+  if (state.instance) XR(xrDestroyInstance(state.instance), "xrDestroyInstance");
   state.system = XR_NULL_SYSTEM_ID;
   state.instance = XR_NULL_HANDLE;
+  return true;
 }
 
 static void xrthrow(XrResult result, const char* symbol) {
@@ -3903,6 +4132,7 @@ static XrViewStateFlags locateViews(XrView views[4], uint32_t* count) {
 }
 
 static bool createSwapchains(void) {
+  lovrAssert(!state.stopping, "Headset session teardown is pending");
   uint32_t width = state.width;
   uint32_t height = state.height;
 
@@ -3934,8 +4164,17 @@ static bool createSwapchains(void) {
     }
   }
 
-  lovrSwapchainDestroy(&state.swapchains[SWAPCHAIN_COLOR]);
-  lovrSwapchainDestroy(&state.swapchains[SWAPCHAIN_DEPTH]);
+  if (!gpu_prepare_teardown()) return false;
+  state.presentationReady = false;
+  memset(&state.layer, 0, sizeof(state.layer));
+  memset(state.layerViews, 0, sizeof(state.layerViews));
+  memset(state.depthInfo, 0, sizeof(state.depthInfo));
+  lovrGraphicsInvalidateSessionPass(state.pass);
+  if (!lovrSwapchainDestroyPrepared(&state.swapchains[SWAPCHAIN_COLOR])) return false;
+  if (!lovrSwapchainDestroyPrepared(&state.swapchains[SWAPCHAIN_DEPTH])) return false;
+  lovrRelease(state.pass, lovrPassDestroy);
+  state.pass = lovrPassCreate("Headset");
+  if (!state.pass || !lovrGraphicsRegisterSessionPass(state.pass)) return false;
 
   if (!lovrSwapchainInit(&state.swapchains[SWAPCHAIN_COLOR], width, height, VIEW | FOVEATED | HDR)) {
     return false;
@@ -3976,6 +4215,7 @@ static bool createSwapchains(void) {
     }
   }
 
+  state.presentationReady = true;
   return true;
 }
 
@@ -4114,6 +4354,8 @@ static XrBodyTrackerBD getBodyTracker(void) {
 }
 
 static bool loadControllerModels(void) {
+  lovrAssert(state.session && !state.stopping && state.modelLockInitialized,
+    "Headset model session is unavailable");
   uint32_t count = 0;
   XrInteractionRenderModelIdsEnumerateInfoEXT enumerateInfo = { .type = XR_TYPE_INTERACTION_RENDER_MODEL_IDS_ENUMERATE_INFO_EXT };
   XR(xrEnumerateInteractionRenderModelIdsEXT(state.session, &enumerateInfo, 0, &count, NULL), "xrEnumerateInteractionRenderModelIdsEXT");
@@ -4313,6 +4555,7 @@ EXPORT uintptr_t xr_get_session(void) {
 const HeadsetOps lovrHeadsetOpenXROps = {
   .HeadsetInit = openxrHeadsetInit,
   .HeadsetDestroy = openxrHeadsetDestroy,
+  .HeadsetDisconnect = openxrDisconnect,
   .HeadsetConnect = openxrHeadsetConnect,
   .HeadsetIsConnected = openxrHeadsetIsConnected,
   .HeadsetGetName = openxrHeadsetGetName,

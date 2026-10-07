@@ -1,5 +1,6 @@
 #include "api.h"
 #include "graphics/graphics.h"
+#include "graphics/graphics_session.h"
 #include "data/blob.h"
 #include "data/image.h"
 #include "math/math.h"
@@ -10,6 +11,7 @@
 
 static int l_lovrPassReset(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   lovrPassReset(pass);
   return 0;
 }
@@ -78,6 +80,7 @@ static int l_lovrPassGetCanvas(lua_State* L) {
 
 int l_lovrPassSetCanvas(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   Canvas canvas = {
     .depthFormat = FORMAT_D32F,
     .samples = 4
@@ -186,6 +189,7 @@ static int l_lovrPassGetClear(lua_State* L) {
 
 static int l_lovrPassSetClear(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
 
   LoadAction loads[4] = { 0 };
   float clears[4][4] = { 0 };
@@ -306,6 +310,7 @@ static int l_lovrPassGetViewPose(lua_State* L) {
 
 static int l_lovrPassSetViewPose(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   uint32_t view = luaL_checkinteger(L, 2) - 1;
   Mat4* matrix = luax_totype(L, 3, Mat4);
   if (matrix) {
@@ -348,6 +353,7 @@ static int l_lovrPassGetProjection(lua_State* L) {
 
 static int l_lovrPassSetProjection(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   uint32_t view = lua_type(L, 2) == LUA_TNUMBER ? lua_tointeger(L, 2) - 1 : ~0u;
   mat4 projection = (float[16]) { 0 };
 
@@ -435,6 +441,7 @@ static int l_lovrPassGetViewRay(lua_State* L) {
 
 static int l_lovrPassPush(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   StackType stack = luax_checkenum(L, 2, StackType, "transform");
   luax_assert(L, lovrPassPush(pass, stack));
   return 0;
@@ -442,6 +449,7 @@ static int l_lovrPassPush(lua_State* L) {
 
 static int l_lovrPassPop(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   StackType stack = luax_checkenum(L, 2, StackType, "transform");
   luax_assert(L, lovrPassPop(pass, stack));
   return 0;
@@ -449,6 +457,7 @@ static int l_lovrPassPop(lua_State* L) {
 
 static int l_lovrPassOrigin(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   lovrPassOrigin(pass);
   return 0;
 }
@@ -456,6 +465,7 @@ static int l_lovrPassOrigin(lua_State* L) {
 static int l_lovrPassTranslate(lua_State* L) {
   float translation[3];
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   luax_readvec3(L, 2, translation, NULL);
   lovrPassTranslate(pass, translation);
   return 0;
@@ -464,6 +474,7 @@ static int l_lovrPassTranslate(lua_State* L) {
 static int l_lovrPassRotate(lua_State* L) {
   float rotation[4];
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   luax_readquat(L, 2, rotation, NULL);
   lovrPassRotate(pass, rotation);
   return 0;
@@ -472,6 +483,7 @@ static int l_lovrPassRotate(lua_State* L) {
 static int l_lovrPassScale(lua_State* L) {
   float scale[3];
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   luax_readscale(L, 2, scale, 3, NULL);
   lovrPassScale(pass, scale);
   return 0;
@@ -480,6 +492,7 @@ static int l_lovrPassScale(lua_State* L) {
 static int l_lovrPassTransform(lua_State* L) {
   float transform[16];
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   if (lua_gettop(L) == 8) {
     float x = luax_checkfloat(L, 2);
     float y = luax_checkfloat(L, 3);
@@ -501,12 +514,14 @@ static int l_lovrPassTransform(lua_State* L) {
 
 static int l_lovrPassSetAlphaToCoverage(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   lovrPassSetAlphaToCoverage(pass, lua_toboolean(L, 2));
   return 0;
 }
 
 static int l_lovrPassSetBlendMode(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   int index = 2;
   uint32_t target = lua_type(L, 2) == LUA_TNUMBER ? luax_checku32(L, index++) - 1 : ~0u;
   BlendMode mode = lua_isnoneornil(L, index) ? BLEND_NONE : luax_checkenum(L, index++, BlendMode, NULL);
@@ -524,6 +539,7 @@ static int l_lovrPassSetBlendMode(lua_State* L) {
 
 static int l_lovrPassSetBlendState(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   int index = 2;
   uint32_t target = lua_type(L, 2) == LUA_TNUMBER ? luax_checku32(L, index++) - 1 : ~0u;
   bool enable = !lua_isnoneornil(L, index);
@@ -555,6 +571,7 @@ static int l_lovrPassSetBlendState(lua_State* L) {
 
 static int l_lovrPassSetColor(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float color[4];
   luax_readcolor(L, 2, color);
   lovrPassSetColor(pass, color);
@@ -563,6 +580,7 @@ static int l_lovrPassSetColor(lua_State* L) {
 
 static int l_lovrPassSetColorWrite(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   int index = 2;
   uint32_t target = lua_type(L, 2) == LUA_TNUMBER ? luax_checku32(L, index++) - 1 : ~0u;
   bool r, g, b, a;
@@ -587,6 +605,7 @@ static int l_lovrPassSetColorWrite(lua_State* L) {
 
 static int l_lovrPassSetDepthTest(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   CompareMode test = luax_checkcomparemode(L, 2);
   lovrPassSetDepthTest(pass, test);
   return 0;
@@ -594,6 +613,7 @@ static int l_lovrPassSetDepthTest(lua_State* L) {
 
 static int l_lovrPassSetDepthWrite(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   bool write = lua_toboolean(L, 2);
   lovrPassSetDepthWrite(pass, write);
   return 0;
@@ -601,6 +621,7 @@ static int l_lovrPassSetDepthWrite(lua_State* L) {
 
 static int l_lovrPassSetDepthOffset(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float offset = luax_optfloat(L, 2, 0.f);
   float sloped = luax_optfloat(L, 3, 0.f);
   lovrPassSetDepthOffset(pass, offset, sloped);
@@ -609,6 +630,7 @@ static int l_lovrPassSetDepthOffset(lua_State* L) {
 
 static int l_lovrPassSetDepthClamp(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   bool clamp = lua_toboolean(L, 2);
   lovrPassSetDepthClamp(pass, clamp);
   return 0;
@@ -616,6 +638,7 @@ static int l_lovrPassSetDepthClamp(lua_State* L) {
 
 static int l_lovrPassSetFaceCull(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   CullMode mode;
   if (lua_type(L, 2) == LUA_TBOOLEAN) {
     mode = lua_toboolean(L, 2) ? CULL_BACK : CULL_NONE;
@@ -628,6 +651,7 @@ static int l_lovrPassSetFaceCull(lua_State* L) {
 
 static int l_lovrPassSetFont(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   Font* font = luax_totype(L, 2, Font);
   lovrPassSetFont(pass, font);
   return 0;
@@ -635,6 +659,7 @@ static int l_lovrPassSetFont(lua_State* L) {
 
 static int l_lovrPassSetMaterial(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   Material* material = luax_optmaterial(L, 2);
   lovrPassSetMaterial(pass, material);
   return 0;
@@ -642,6 +667,7 @@ static int l_lovrPassSetMaterial(lua_State* L) {
 
 static int l_lovrPassSetMeshMode(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   DrawMode mode = luax_checkenum(L, 2, DrawMode, NULL);
   lovrPassSetMeshMode(pass, mode);
   return 0;
@@ -649,6 +675,7 @@ static int l_lovrPassSetMeshMode(lua_State* L) {
 
 static int l_lovrPassSetSampler(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   if (lua_type(L, 2) != LUA_TUSERDATA) {
     FilterMode filter = luax_checkenum(L, 2, FilterMode, "linear");
     Sampler* sampler = lovrGraphicsGetDefaultSampler(filter);
@@ -662,6 +689,7 @@ static int l_lovrPassSetSampler(lua_State* L) {
 
 static int l_lovrPassSetScissor(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   if (lua_isnoneornil(L, 2)) {
     lovrPassSetScissor(pass, NULL);
   } else {
@@ -679,6 +707,7 @@ static int l_lovrPassSetScissor(lua_State* L) {
 
 static int l_lovrPassSetShader(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   switch (lua_type(L, 2)) {
     case LUA_TNONE:
     case LUA_TNIL:
@@ -695,6 +724,7 @@ static int l_lovrPassSetShader(lua_State* L) {
 
 static int l_lovrPassSetStencilTest(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   CompareMode test = luax_checkcomparemode(L, 2);
   uint8_t value = lua_tointeger(L, 3);
   uint8_t mask = luaL_optinteger(L, 4, 0xff);
@@ -704,6 +734,7 @@ static int l_lovrPassSetStencilTest(lua_State* L) {
 
 static int l_lovrPassSetStencilWrite(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   StencilAction actions[3];
   if (lua_isnoneornil(L, 2)) {
     actions[0] = actions[1] = actions[2] = STENCIL_KEEP;
@@ -731,6 +762,7 @@ static int l_lovrPassSetStencilWrite(lua_State* L) {
 
 static int l_lovrPassSetViewCull(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   bool enable = lua_toboolean(L, 2);
   lovrPassSetViewCull(pass, enable);
   return 0;
@@ -738,6 +770,7 @@ static int l_lovrPassSetViewCull(lua_State* L) {
 
 static int l_lovrPassSetViewport(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   if (lua_isnoneornil(L, 2)) {
     lovrPassSetViewport(pass, NULL);
   } else {
@@ -759,6 +792,7 @@ static int l_lovrPassSetViewport(lua_State* L) {
 
 static int l_lovrPassSetWinding(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   Winding winding = luax_checkenum(L, 2, Winding, NULL);
   lovrPassSetWinding(pass, winding);
   return 0;
@@ -766,6 +800,7 @@ static int l_lovrPassSetWinding(lua_State* L) {
 
 static int l_lovrPassSetWireframe(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   bool wireframe = lua_toboolean(L, 2);
   lovrPassSetWireframe(pass, wireframe);
   return 0;
@@ -773,6 +808,7 @@ static int l_lovrPassSetWireframe(lua_State* L) {
 
 static int l_lovrPassSend(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
 
   size_t length;
   const char* name = luaL_checklstring(L, 2, &length);
@@ -956,6 +992,7 @@ static void luax_readvertices(lua_State* L, int index, float* vertices, uint32_t
 
 static int l_lovrPassPoints(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float* vertices;
   uint32_t count = luax_getvertexcount(L, 2);
   luax_assert(L, lovrPassPoints(pass, count, &vertices));
@@ -965,6 +1002,7 @@ static int l_lovrPassPoints(lua_State* L) {
 
 static int l_lovrPassLine(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float* vertices;
   uint32_t count = luax_getvertexcount(L, 2);
   luax_assert(L, lovrPassLine(pass, count, &vertices));
@@ -974,6 +1012,7 @@ static int l_lovrPassLine(lua_State* L) {
 
 static int l_lovrPassPolygon(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float* vertices;
   uint32_t count = luax_getvertexcount(L, 2);
   luax_assert(L, lovrPassPolygon(pass, count, &vertices));
@@ -983,6 +1022,7 @@ static int l_lovrPassPolygon(lua_State* L) {
 
 static int l_lovrPassPlane(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   int index = luax_readmat4(L, 2, transform, 2);
   DrawStyle style = luax_checkenum(L, index++, DrawStyle, "fill");
@@ -994,6 +1034,7 @@ static int l_lovrPassPlane(lua_State* L) {
 
 static int l_lovrPassRoundrect(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   int index = luax_readmat4(L, 2, transform, 3);
   float radius = luax_optfloat(L, index++, 0.f);
@@ -1004,6 +1045,7 @@ static int l_lovrPassRoundrect(lua_State* L) {
 
 static int l_lovrPassCube(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   int index = luax_readmat4(L, 2, transform, 1);
   DrawStyle style = luax_checkenum(L, index, DrawStyle, "fill");
@@ -1013,6 +1055,7 @@ static int l_lovrPassCube(lua_State* L) {
 
 static int l_lovrPassBox(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   int index = luax_readmat4(L, 2, transform, 3);
   DrawStyle style = luax_checkenum(L, index, DrawStyle, "fill");
@@ -1022,6 +1065,7 @@ static int l_lovrPassBox(lua_State* L) {
 
 static int l_lovrPassCircle(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   int index = luax_readmat4(L, 2, transform, 1);
   DrawStyle style = luax_checkenum(L, index++, DrawStyle, "fill");
@@ -1034,6 +1078,7 @@ static int l_lovrPassCircle(lua_State* L) {
 
 static int l_lovrPassSphere(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   int index = luax_readmat4(L, 2, transform, 1);
   uint32_t segmentsH = luax_optu32(L, index++, 48);
@@ -1072,6 +1117,7 @@ static bool luax_checkendpoints(lua_State* L, int index, float transform[16], bo
 
 static int l_lovrPassCylinder(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   int index = luax_checkendpoints(L, 2, transform, true) ? 5 : luax_readmat4(L, 2, transform, -2);
   bool capped = lua_isnoneornil(L, index) ? true : lua_toboolean(L, index++);
@@ -1084,6 +1130,7 @@ static int l_lovrPassCylinder(lua_State* L) {
 
 static int l_lovrPassCone(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   int index = luax_checkendpoints(L, 2, transform, false) ? 5 : luax_readmat4(L, 2, transform, -2);
   uint32_t segments = luax_optu32(L, index, 64);
@@ -1093,6 +1140,7 @@ static int l_lovrPassCone(lua_State* L) {
 
 static int l_lovrPassCapsule(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   int index = luax_checkendpoints(L, 2, transform, true) ? 5 : luax_readmat4(L, 2, transform, -2);
   uint32_t segments = luax_optu32(L, index, 32);
@@ -1102,6 +1150,7 @@ static int l_lovrPassCapsule(lua_State* L) {
 
 static int l_lovrPassTorus(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   int index = luax_readmat4(L, 2, transform, -2);
   uint32_t segmentsT = luax_optu32(L, index++, 64);
@@ -1112,6 +1161,7 @@ static int l_lovrPassTorus(lua_State* L) {
 
 static int l_lovrPassText(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   uint32_t count;
   ColoredString stack;
   ColoredString* strings = luax_checkcoloredstrings(L, 2, &count, &stack);
@@ -1127,6 +1177,7 @@ static int l_lovrPassText(lua_State* L) {
 
 static int l_lovrPassSkybox(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   Texture* texture = luax_totype(L, 2, Texture);
   luax_assert(L, lovrPassSkybox(pass, texture));
   return 0;
@@ -1134,6 +1185,7 @@ static int l_lovrPassSkybox(lua_State* L) {
 
 static int l_lovrPassFill(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   Texture* texture = lua_isnoneornil(L, 2) ? NULL : luax_checktype(L, 2, Texture);
   luax_assert(L, lovrPassFill(pass, texture));
   return 0;
@@ -1141,6 +1193,7 @@ static int l_lovrPassFill(lua_State* L) {
 
 static int l_lovrPassMonkey(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
   luax_readmat4(L, 2, transform, 1);
   luax_assert(L, lovrPassMonkey(pass, transform));
@@ -1149,6 +1202,7 @@ static int l_lovrPassMonkey(lua_State* L) {
 
 static int l_lovrPassDraw(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   float transform[16];
 
   Model* model = luax_totype(L, 2, Model);
@@ -1183,6 +1237,7 @@ static int l_lovrPassDraw(lua_State* L) {
 
 static int l_lovrPassDrawPart(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   Model* model = luax_checktype(L, 2, Model);
   uint32_t mesh = luax_checku32(L, 3) - 1;
   uint32_t part = lua_isnoneornil(L, 4) ? ~0u : luax_checku32(L, 4) - 1;
@@ -1195,6 +1250,7 @@ static int l_lovrPassDrawPart(lua_State* L) {
 
 static int l_lovrPassMesh(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   Buffer* vertices = (!lua_toboolean(L, 2) || lua_type(L, 2) == LUA_TNUMBER) ? NULL : luax_checktype(L, 2, Buffer);
   Buffer* indices = luax_totype(L, 3, Buffer);
   Buffer* indirect = luax_totype(L, 4, Buffer);
@@ -1220,6 +1276,7 @@ static int l_lovrPassMesh(lua_State* L) {
 
 static int l_lovrPassBeginTally(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   uint32_t index;
   luax_assert(L, lovrPassBeginTally(pass, &index));
   lua_pushinteger(L, index);
@@ -1228,6 +1285,7 @@ static int l_lovrPassBeginTally(lua_State* L) {
 
 static int l_lovrPassFinishTally(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   uint32_t index;
   luax_assert(L, lovrPassFinishTally(pass, &index));
   lua_pushinteger(L, index);
@@ -1250,6 +1308,7 @@ static int l_lovrPassGetTallyBuffer(lua_State* L) {
 
 static int l_lovrPassSetTallyBuffer(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   Buffer* buffer = luax_totype(L, 2, Buffer);
   uint32_t offset = luax_optu32(L, 3, 0);
   luax_assert(L, lovrPassSetTallyBuffer(pass, buffer, offset));
@@ -1258,6 +1317,7 @@ static int l_lovrPassSetTallyBuffer(lua_State* L) {
 
 static int l_lovrPassCompute(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   Buffer* buffer = luax_totype(L, 2, Buffer);
   if (buffer) {
     uint32_t offset = lua_tointeger(L, 3);
@@ -1273,6 +1333,7 @@ static int l_lovrPassCompute(lua_State* L) {
 
 static int l_lovrPassBarrier(lua_State* L) {
   Pass* pass = luax_checktype(L, 1, Pass);
+  if (!lovrPassIsValid(pass)) return luaL_error(L, "Pass belongs to an invalidated headset session");
   lovrPassBarrier(pass);
   return 0;
 }

@@ -1,10 +1,12 @@
 #include "api.h"
 #include "headset/headset.h"
+#include "headset/headset_layer.h"
 #include "core/maf.h"
 #include "util.h"
 
 static int l_lovrLayerGetOrigin(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   Device device = lovrLayerGetOrigin(layer);
   if (device >= MAX_DEVICES) {
     lua_pushnil(L);
@@ -16,6 +18,7 @@ static int l_lovrLayerGetOrigin(lua_State* L) {
 
 static int l_lovrLayerSetOrigin(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   if (lua_isnoneornil(L, 2)) {
     lovrLayerSetOrigin(layer, MAX_DEVICES);
   } else {
@@ -27,6 +30,7 @@ static int l_lovrLayerSetOrigin(lua_State* L) {
 
 static int l_lovrLayerGetPosition(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float position[3], orientation[4];
   lovrLayerGetPose(layer, position, orientation);
   lua_pushnumber(L, position[0]);
@@ -37,6 +41,7 @@ static int l_lovrLayerGetPosition(lua_State* L) {
 
 static int l_lovrLayerSetPosition(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float position[3], orientation[4];
   lovrLayerGetPose(layer, position, orientation);
   luax_readvec3(L, 2, position, NULL);
@@ -46,6 +51,7 @@ static int l_lovrLayerSetPosition(lua_State* L) {
 
 static int l_lovrLayerGetOrientation(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float position[3], orientation[4], angle, ax, ay, az;
   lovrLayerGetPose(layer, position, orientation);
   quat_getAngleAxis(orientation, &angle, &ax, &ay, &az);
@@ -58,6 +64,7 @@ static int l_lovrLayerGetOrientation(lua_State* L) {
 
 static int l_lovrLayerSetOrientation(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float position[3], orientation[4];
   lovrLayerGetPose(layer, position, orientation);
   luax_readquat(L, 2, orientation, NULL);
@@ -67,6 +74,7 @@ static int l_lovrLayerSetOrientation(lua_State* L) {
 
 static int l_lovrLayerGetPose(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float position[3], orientation[4], angle, ax, ay, az;
   lovrLayerGetPose(layer, position, orientation);
   lua_pushnumber(L, position[0]);
@@ -82,6 +90,7 @@ static int l_lovrLayerGetPose(lua_State* L) {
 
 static int l_lovrLayerSetPose(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float position[3], orientation[4];
   int index = luax_readvec3(L, 2, position, NULL);
   luax_readquat(L, index, orientation, NULL);
@@ -91,6 +100,7 @@ static int l_lovrLayerSetPose(lua_State* L) {
 
 static int l_lovrLayerGetDimensions(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float width, height;
   lovrLayerGetDimensions(layer, &width, &height);
   lua_pushnumber(L, width);
@@ -100,6 +110,7 @@ static int l_lovrLayerGetDimensions(lua_State* L) {
 
 static int l_lovrLayerSetDimensions(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float width = luax_checkfloat(L, 2);
   float height = luax_checkfloat(L, 3);
   lovrLayerSetDimensions(layer, width, height);
@@ -108,6 +119,7 @@ static int l_lovrLayerSetDimensions(lua_State* L) {
 
 static int l_lovrLayerGetCurve(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float curve = lovrLayerGetCurve(layer);
   lua_pushnumber(L, curve);
   return 1;
@@ -115,6 +127,7 @@ static int l_lovrLayerGetCurve(lua_State* L) {
 
 static int l_lovrLayerSetCurve(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float curve = luax_optfloat(L, 2, 0.f);
   luax_assert(L, lovrLayerSetCurve(layer, curve));
   return 0;
@@ -122,6 +135,7 @@ static int l_lovrLayerSetCurve(lua_State* L) {
 
 static int l_lovrLayerGetColor(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float color[4];
   lovrLayerGetColor(layer, color);
   lua_pushnumber(L, color[0]);
@@ -133,6 +147,7 @@ static int l_lovrLayerGetColor(lua_State* L) {
 
 static int l_lovrLayerSetColor(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   float color[4];
   luax_readcolor(L, 1, color);
   lovrLayerSetColor(layer, color);
@@ -141,6 +156,7 @@ static int l_lovrLayerSetColor(lua_State* L) {
 
 static int l_lovrLayerGetViewport(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   int32_t viewport[4];
   lovrLayerGetViewport(layer, viewport);
   lua_pushinteger(L, viewport[0]);
@@ -152,6 +168,7 @@ static int l_lovrLayerGetViewport(lua_State* L) {
 
 static int l_lovrLayerSetViewport(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   int32_t viewport[4];
   viewport[0] = luax_optu32(L, 2, 0);
   viewport[1] = luax_optu32(L, 3, 0);
@@ -163,6 +180,7 @@ static int l_lovrLayerSetViewport(lua_State* L) {
 
 static int l_lovrLayerGetTexture(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   struct Texture* texture = lovrLayerGetTexture(layer);
   luax_assert(L, texture);
   luax_pushtype(L, Texture, texture);
@@ -172,6 +190,7 @@ static int l_lovrLayerGetTexture(lua_State* L) {
 // Deprecated
 static int l_lovrLayerGetPass(lua_State* L) {
   Layer* layer = luax_checktype(L, 1, Layer);
+  luax_assert(L, lovrLayerIsValid(layer));
   struct Pass* pass = lovrLayerGetPass(layer);
   luax_assert(L, pass);
   luax_pushtype(L, Pass, pass);

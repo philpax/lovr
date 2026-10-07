@@ -1,5 +1,6 @@
 #include "api.h"
 #include "graphics/graphics.h"
+#include "graphics/graphics_session.h"
 #include "data/blob.h"
 #include "data/image.h"
 #include "data/modelData.h"
@@ -1152,6 +1153,7 @@ static int l_lovrGraphicsNewTexture(lua_State* L) {
 
 static int l_lovrGraphicsNewTextureView(lua_State* L) {
   Texture* texture = luax_checktype(L, 1, Texture);
+  if (!lovrTextureIsValid(texture)) return luaL_error(L, "Texture belongs to an invalidated headset session");
   const TextureInfo* base = lovrTextureGetInfo(texture);
 
   TextureViewInfo info = {
@@ -1442,7 +1444,13 @@ static Texture* luax_opttexture(lua_State* L, int index) {
   }
 
   Texture* texture = luax_totype(L, index, Texture);
-  if (texture) return texture;
+  if (texture) {
+    if (!lovrTextureIsValid(texture)) {
+      (void) luaL_error(L, "Texture belongs to an invalidated headset session");
+      return NULL;
+    }
+    return texture;
+  }
 
   Image* image = luax_checkimage(L, index);
 
