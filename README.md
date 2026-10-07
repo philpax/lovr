@@ -89,6 +89,20 @@ cmake --build .
 
 See the [Compiling Guide](https://lovr.org/docs/Compiling) for more info.
 
+The optional Linux Vulkan OpenVR connection foundation builds with `-DLOVR_ENABLE_OPENVR=ON`.
+It does not yet provide a selectable headset backend. The option defaults to off.
+`deps/openvr` pins Valve's OpenVR SDK 2.15.6 at `0924064316de3effbcd1acf1e309182a2deb1c05`.
+The static loader is built from the SDK sources into the CMake build directory, without a SteamVR installation.
+The SDK's redistribution terms are in `deps/openvr/LICENSE`; binary distributions that enable the option must include them.
+Loading LÖVR does not initialize OpenVR. Connecting resolves the runtime through the SDK's runtime registry.
+The private adapter permits one process-wide connection. Its owning object must remain at a stable address
+and must not be copied or externally mutated. Loader callbacks must not reenter the adapter.
+Callers serialize function-table use against disconnect.
+
+Hardware-free native connection tests build with `-DLOVR_BUILD_HEADSET_TESTS=ON`.
+Build the `headset_native_tests` target and run `ctest --test-dir <build-directory> --output-on-failure -L headset`.
+`-DLOVR_SANITIZE=ON` instruments the native test executables on supported compilers.
+
 Testing
 ---
 

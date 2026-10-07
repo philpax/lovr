@@ -31,6 +31,7 @@ option(LOVR_LUAU_ANALYSIS "Link Luau's type checker into the library" OFF)
 option(LOVR_USE_GLSLANG "Use glslang to compile GLSL shaders" ON)
 option(LOVR_USE_VULKAN "Use the Vulkan renderer" ON)
 option(LOVR_USE_WEBGPU "Use the WebGPU renderer" OFF)
+option(LOVR_ENABLE_OPENVR "Build the optional Linux Vulkan OpenVR loader" OFF)
 option(LOVR_USE_STEAM_AUDIO "Use Steam Audio for audio spatialization" ON)
 option(LOVR_USE_TINCTURE "Use tincture to compile shaders" OFF)
 
@@ -42,6 +43,7 @@ option(LOVR_SYSTEM_OPENXR "Use the system-provided OpenXR" OFF)
 # Debugging
 option(LOVR_SANITIZE "Enable Address Sanitizer" OFF)
 option(LOVR_PROFILE "Enable Tracy integration" OFF)
+option(LOVR_BUILD_HEADSET_TESTS "Build hardware-free native headset tests" OFF)
 
 # Packaging
 option(LOVR_BUILD_EXE "Build an executable (or an apk on Android)" ON)
@@ -299,6 +301,48 @@ if(LOVR_ENABLE_HEADSET AND NOT EMSCRIPTEN)
   endif()
 endif()
 
+if(LOVR_ENABLE_OPENVR)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID OR NOT LOVR_USE_VULKAN OR NOT LOVR_ENABLE_HEADSET)
+    message(FATAL_ERROR "LOVR_ENABLE_OPENVR requires the Linux Vulkan headset module")
+  endif()
+  add_library(lovr_openvr_loader STATIC
+    deps/openvr/src/openvr_api_public.cpp
+    deps/openvr/src/jsoncpp.cpp
+    deps/openvr/src/vrcore/dirtools_public.cpp
+    deps/openvr/src/vrcore/envvartools_public.cpp
+    deps/openvr/src/vrcore/pathtools_public.cpp
+    deps/openvr/src/vrcore/sharedlibtools_public.cpp
+    deps/openvr/src/vrcore/hmderrors_public.cpp
+    deps/openvr/src/vrcore/vrpathregistry_public.cpp
+    deps/openvr/src/vrcore/strtools_public.cpp
+  )
+  target_include_directories(lovr_openvr_loader SYSTEM PUBLIC deps/openvr/headers)
+  target_include_directories(lovr_openvr_loader PRIVATE deps/openvr/src deps/openvr/src/vrcore)
+  target_compile_definitions(lovr_openvr_loader PRIVATE VR_API_PUBLIC VRCORE_NO_PLATFORM LINUX POSIX)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    target_compile_definitions(lovr_openvr_loader PRIVATE LINUXARM64)
+  elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    target_compile_definitions(lovr_openvr_loader PRIVATE LINUX64)
+  endif()
+  set_target_properties(lovr_openvr_loader PROPERTIES
+    CXX_STANDARD 11
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+  )
+  target_link_libraries(lovr_openvr_loader PRIVATE ${CMAKE_DL_LIBS})
+  add_library(lovr_openvr_runtime STATIC src/modules/headset/openvr_runtime.c)
+  target_include_directories(lovr_openvr_runtime PUBLIC src/modules)
+  target_link_libraries(lovr_openvr_runtime PUBLIC lovr_openvr_loader)
+  set_target_properties(lovr_openvr_runtime PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON POSITION_INDEPENDENT_CODE ON)
+  set(LOVR_OPENVR lovr_openvr_runtime)
+endif()
+
+if(LOVR_BUILD_HEADSET_TESTS)
+  enable_testing()
+  add_subdirectory(test/native headset-tests)
+endif()
+
 # pthreads
 if(LOVR_ENABLE_THREAD AND NOT (WIN32 OR EMSCRIPTEN))
   set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -349,6 +393,11 @@ target_include_directories(lovr PRIVATE
 
 target_link_directories(lovr PRIVATE ${LOVR_LIB_DIRS})
 
+if(LOVR_ENABLE_OPENVR)
+  target_sources(lovr PRIVATE src/modules/headset/openvr_runtime.c)
+  target_link_options(lovr PRIVATE "LINKER:--exclude-libs,liblovr_openvr_loader.a")
+endif()
+
 target_link_libraries(lovr
   ${LOVR_GLFW}
   ${LOVR_LUA}
@@ -358,6 +407,7 @@ target_link_libraries(lovr
   ${LOVR_GLSLANG}
   ${LOVR_TINCTURE}
   ${LOVR_OPENXR}
+  ${LOVR_OPENVR}
   ${LOVR_PTHREADS}
   ${EMSCRIPTEN_LINKER_FLAGS}
 )

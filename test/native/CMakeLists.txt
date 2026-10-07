@@ -1,0 +1,55 @@
+add_custom_target(headset_native_tests)
+
+function(configure_native_test target)
+  set_target_properties(${target} PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4 /WX)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
+  endif()
+  if(LOVR_SANITIZE)
+    if(MSVC)
+      target_compile_options(${target} PRIVATE /fsanitize=address)
+      target_link_options(${target} PRIVATE /INCREMENTAL:NO)
+    else()
+      target_compile_options(${target} PRIVATE -fsanitize=address,undefined -O1 -fno-omit-frame-pointer)
+      target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endif()
+  endif()
+  add_dependencies(headset_native_tests ${target})
+endfunction()
+
+add_executable(headset_harness_selftest harness_selftest.c)
+configure_native_test(headset_harness_selftest)
+add_test(NAME headset.harness COMMAND headset_harness_selftest)
+add_test(NAME headset.harness.discovery COMMAND headset_harness_selftest --list)
+add_test(NAME headset.harness.failure-propagation
+  COMMAND ${CMAKE_COMMAND} -DTEST_EXECUTABLE=$<TARGET_FILE:headset_harness_selftest>
+    -DCTEST_EXECUTABLE=${CMAKE_CTEST_COMMAND} -DTEST_DIRECTORY=${PROJECT_BINARY_DIR}
+    -DOPENVR_ENABLED=${LOVR_ENABLE_OPENVR}
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/check_failure.cmake)
+set_tests_properties(headset.harness headset.harness.discovery headset.harness.failure-propagation
+  PROPERTIES LABELS headset)
+
+if(LOVR_ENABLE_OPENVR)
+  add_executable(headset_openvr_tests openvr_runtime.c)
+  target_link_libraries(headset_openvr_tests PRIVATE lovr_openvr_runtime)
+  configure_native_test(headset_openvr_tests)
+  if(LOVR_SANITIZE)
+    target_compile_options(lovr_openvr_runtime PRIVATE -fsanitize=address,undefined -O1 -fno-omit-frame-pointer)
+    target_link_options(lovr_openvr_runtime INTERFACE -fsanitize=address,undefined)
+    target_compile_options(lovr_openvr_loader PRIVATE -fsanitize=address,undefined -O1 -fno-omit-frame-pointer)
+    target_link_options(lovr_openvr_loader INTERFACE -fsanitize=address,undefined)
+  endif()
+  foreach(case IN ITEMS overlay-sdk-fntables idempotent-lifecycle exclusive-owner init-failure-cleanup-retry
+      version-failure-cleanup interface-failure-cleanup sdk-failure-cleanup incomplete-loader)
+    add_test(NAME headset.openvr.${case} COMMAND headset_openvr_tests --case openvr.${case})
+    set_tests_properties(headset.openvr.${case} PROPERTIES LABELS headset)
+  endforeach()
+  add_test(NAME headset.openvr.discovery COMMAND headset_openvr_tests --list)
+  add_test(NAME headset.openvr.without-runtime COMMAND headset_openvr_tests --without-runtime)
+  set(absent_runtime "${CMAKE_CURRENT_BINARY_DIR}/absent-openvr-runtime")
+  set_tests_properties(headset.openvr.discovery headset.openvr.without-runtime PROPERTIES LABELS headset)
+  set_tests_properties(headset.openvr.without-runtime PROPERTIES
+    ENVIRONMENT "VR_OVERRIDE=${absent_runtime};VR_PATHREG_OVERRIDE=${absent_runtime};HOME=${absent_runtime};XDG_CONFIG_HOME=${absent_runtime};XDG_DATA_HOME=${absent_runtime}")
+endif()
