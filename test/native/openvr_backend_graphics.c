@@ -1,3 +1,9 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#define canonicalize libcCanonicalize
+#include <math.h>
+#undef canonicalize
 #include "test.h"
 #include "../../src/modules/graphics/graphics.c"
 #define LOVR_LAYER_GRAPHICS_HARNESS
@@ -40,13 +46,18 @@ OpenVRPanelResult testedPanelDestroy(OpenVRPanel* panel);
 #define LOVR_OPENVR_VALIDATE_CONFIG
 #define state vrState
 #define LOVR_OPENVR_GRAPHICS_HARNESS
+#include "headset/openvr_assets.h"
+static OpenVRAssetsResult backendAssetsResolve(bool shared, const OpenVRAssetsProvider* provider);
+#define lovrOpenVRAssetsResolve backendAssetsResolve
 #include "../../src/modules/headset/headset_openvr.c"
+#undef lovrOpenVRAssetsResolve
 static void checkRuntimeShutdown(void);
 #include "openvr_backend.c"
 #undef state
 
+static unsigned textureCreates;
 size_t gpu_sizeof_texture(void) { return sizeof(gpu_texture); }
-bool gpu_texture_init(gpu_texture* texture, gpu_texture_info* info) { (void) info; *texture = (gpu_texture) { 0 }; return true; }
+bool gpu_texture_init(gpu_texture* texture, gpu_texture_info* info) { (void) info; textureCreates++; *texture = (gpu_texture) { 0 }; return true; }
 bool gpu_texture_init_view(gpu_texture* texture, gpu_texture_view_info* info) {
   if (!runtimeAlive || !info->source || info->source->destroyed) abort();
   *texture = (gpu_texture) { .view = true }; liveViews++; return true;
@@ -64,7 +75,19 @@ void gpu_flush_deferred_after_idle(void) { deferredDestroys = 0; drainCalls++; }
 bool lovrHeadsetIsActive(void) { return false; }
 double lovrHeadsetGetDisplayTime(void) { return 0.; }
 
-static unsigned frameWaits;
+static unsigned frameWaits, graphicsEvent, overlayPolls;
+static bool OPENVR_FNTABLE_CALLTYPE graphicsInputAvailable(void) { return true; }
+static bool OPENVR_FNTABLE_CALLTYPE graphicsPause(void) { return false; }
+static bool OPENVR_FNTABLE_CALLTYPE graphicsOverlayPoll(VROverlayHandle_t handle, struct VREvent_t* event, uint32_t size) {
+  (void) event; (void) size;
+  if (!handle) abort();
+  overlayPolls++; return false;
+}
+static bool OPENVR_FNTABLE_CALLTYPE graphicsPoll(struct VREvent_t* event, uint32_t size) {
+  (void) size;
+  if (!graphicsEvent) return false;
+  *event = (struct VREvent_t) { .eventType = graphicsEvent }; graphicsEvent = 0; return true;
+}
 static bool invalidTiming, fatalWait;
 static float sceneScale = 1.f;
 static uint32_t sceneWidth = 64, sceneHeight = 32;
@@ -95,7 +118,9 @@ static void OPENVR_FNTABLE_CALLTYPE runtimeFrustum(EVREye eye, float* left, floa
 }
 static struct VR_IVRSystem_FnTable runtimeSystem = { .GetFloatTrackedDeviceProperty = runtimeProperty,
   .GetTimeSinceLastVsync = runtimeVsync, .GetRecommendedRenderTargetSize = runtimeDimensions,
-  .GetDeviceToAbsoluteTrackingPose = runtimeTracking, .GetEyeToHeadTransform = runtimeEye, .GetProjectionRaw = runtimeFrustum };
+  .GetDeviceToAbsoluteTrackingPose = runtimeTracking, .GetEyeToHeadTransform = runtimeEye, .GetProjectionRaw = runtimeFrustum,
+  .PollNextEvent = graphicsPoll, .AcknowledgeQuit_Exiting = backendAck,
+  .IsInputAvailable = graphicsInputAvailable, .ShouldApplicationPause = graphicsPause };
 
 static unsigned sceneCopies, sceneSubmissions, panelCopies, panelSubmissions;
 static uint32_t sceneCopiedEyes[2];
@@ -132,7 +157,7 @@ bool gpu_texture_external_barrier(gpu_stream* stream, gpu_texture* texture, bool
 
 static bool runtimeHideFails, runtimeDestroyFails;
 static unsigned runtimeDestroyCalls, runtimeHideCalls, shutdownDrainBaseline;
-static unsigned projectionCreates, failProjectionCreate;
+static unsigned projectionCreates, failProjectionCreate, runtimeCreates;
 static bool projectionMode, failSceneConfigure, failSceneHandoff, failSceneShow, failSceneHide, failPanelHide;
 static bool panelVisible, showAttempted;
 static unsigned sceneHideCalls;
@@ -147,6 +172,7 @@ static void checkRuntimeShutdown(void) {
 }
 static EVROverlayError OPENVR_FNTABLE_CALLTYPE runtimeCreate(char* key, char* name, VROverlayHandle_t* handle) {
   if (!key || !name) abort();
+  runtimeCreates++;
   if (projectionMode && strstr(key, ".scene.")) {
     if (++projectionCreates == failProjectionCreate) return EVROverlayError_VROverlayError_RequestFailed;
     *handle = 80 + projectionCreates;
@@ -218,6 +244,7 @@ static EVROverlayError OPENVR_FNTABLE_CALLTYPE runtimeTexture(VROverlayHandle_t 
 }
 static struct VR_IVROverlay_FnTable runtimeAPI = {
   .CreateOverlay = runtimeCreate, .DestroyOverlay = runtimeDestroy, .HideOverlay = runtimeHide, .ShowOverlay = runtimeShow,
+  .PollNextOverlayEvent = graphicsOverlayPoll,
   .SetOverlayFlag = runtimeFlag, .SetOverlayColor = runtimeColor, .SetOverlayAlpha = runtimeFloat,
   .SetOverlaySortOrder = runtimeOrder, .SetOverlayWidthInMeters = runtimeFloat, .SetOverlayTexelAspect = runtimeFloat,
   .SetOverlayCurvature = runtimeFloat, .SetOverlayTextureColorSpace = runtimeSpace, .SetOverlayTextureBounds = runtimeBounds,
@@ -327,7 +354,37 @@ static bool panelCanvas(void) {
   state.features.formats[FORMAT_RGBA8][1] = GPU_FEATURE_SAMPLE | GPU_FEATURE_RENDER;
   state.features.formats[FORMAT_D24S8][0] = GPU_FEATURE_RENDER;
   LayerInfo info = { .width = 64, .height = 32, .stereo = true, .filter = true, .transparent = true };
-  Layer* layer = layerCreate(&info);
+  Layer* budget[MAX_LAYERS];
+  unsigned createdBefore = runtimeHideCalls;
+  for (unsigned i = 0; i < limit(); i++) CHECK((budget[i] = layerCreate(&info)));
+  CHECK(runtimeHideCalls == createdBefore + limit());
+  unsigned texturesBefore = textureCreates, overlaysBefore = runtimeCreates;
+  Layer* registryBefore = vrState.all;
+  unsigned refsBefore = atomic_load(&budget[0]->ownership.ref);
+  CHECK(!layerCreate(&info) && strstr(lovrGetError(), "panel budget"));
+  CHECK(textureCreates == texturesBefore && runtimeCreates == overlaysBefore && vrState.all == registryBefore &&
+    atomic_load(&budget[0]->ownership.ref) == refsBefore && runtimeHideCalls == createdBefore + limit());
+  overlayPolls = 0;
+  CHECK(pollEvents() && overlayPolls == limit());
+  vrState.scene.projection.eyes[0] = 81; vrState.scene.projection.eyes[1] = 82;
+  overlayPolls = 0;
+  CHECK(pollEvents() && overlayPolls == MAX_LAYERS);
+  vrState.scene.projection.eyes[0] = vrState.scene.projection.eyes[1] = 0;
+  runtimeDestroyFails = true;
+  lovrRelease(budget[0], layerDestroy);
+  CHECK(vrState.all && !layerCreate(&info));
+  overlayPolls = 0;
+  CHECK(pollEvents() && overlayPolls == limit());
+  runtimeDestroyFails = false;
+  Layer* orphan = vrState.all;
+  while (orphan && !orphan->orphan) orphan = orphan->next;
+  CHECK(orphan && retireLayer(orphan));
+  CHECK((budget[0] = layerCreate(&info)));
+  lovrRelease(budget[1], layerDestroy);
+  overlaysBefore = runtimeCreates;
+  CHECK((budget[1] = layerCreate(&info)) && runtimeCreates == overlaysBefore + 1);
+  for (unsigned i = 1; i < limit(); i++) lovrRelease(budget[i], layerDestroy);
+  Layer* layer = budget[0];
   CHECK(layer);
   Pass* pass = layerPass(layer);
   CHECK(pass && pass->views == 2 && pass->width == 64 && pass->height == 32);
@@ -373,7 +430,38 @@ static bool sceneCanvas(void) {
   vrState.config.supersample = sceneScale;
   lovrOpenVRFrameInit(&vrState.frame, &runtimeSystem, &runtimeAPI);
   frameWaits = 0; frameNow = 1.;
+  unsigned actionsBefore = actionUpdates;
   CHECK(update() && frameWaits == 1 && vrState.frame.updated);
+  CHECK(actionUpdates == actionsBefore + 1 && vrState.inputSerial == vrState.frame.snapshot.serial);
+  failActions = true;
+  CHECK(vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
+  CHECK(!update() && !vrState.inputSerial && !vrState.haptics.hands[0].active);
+  CHECK(strstr(lovrGetError(), "action snapshot"));
+  failActions = false;
+  CHECK(update() && vrState.inputSerial == vrState.frame.snapshot.serial);
+  invalidTiming = true;
+  actionsBefore = actionUpdates;
+  CHECK(update() && actionUpdates == actionsBefore && !vrState.inputSerial);
+  invalidTiming = false;
+  CHECK(update() && vrState.inputSerial == vrState.frame.snapshot.serial);
+  activeInputPose = true;
+  CHECK(update() && vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
+  failHaptic = true;
+  frameNow += .03;
+  CHECK(!update() && !vrState.inputSerial && !vrState.haptics.hands[0].active);
+  CHECK(strstr(lovrGetError(), "deferred haptic"));
+  failHaptic = false;
+  CHECK(update() && vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
+  activeInputPose = false;
+  CHECK(update() && !vrState.haptics.hands[0].active);
+  vrState.events.sampled = true;
+  vrState.events.inputFocus = false;
+  actionsBefore = actionUpdates;
+  vrState.haptics.hands[0].active = true;
+  CHECK(update() && actionUpdates == actionsBefore && !vrState.inputSerial && !vrState.haptics.hands[0].active);
+  vrState.events.inputFocus = true;
+  CHECK(update() && actionUpdates == actionsBefore + 1 && vrState.inputSerial);
+  unsigned pacedFrames = frameWaits;
   OpenVRFrameSnapshot* frame = &vrState.frame.snapshot;
   frame->origin = ETrackingUniverseOrigin_TrackingUniverseStanding;
   frame->width = 64; frame->height = 32; frame->head.valid = true;
@@ -404,11 +492,11 @@ static bool sceneCanvas(void) {
     CHECK(lovrPassGetProjection(pass, eye, observed) && !memcmp(expected, observed, sizeof(expected)));
   }
   Pass* repeated;
-  CHECK(scenePass(&repeated) && repeated == pass && frameWaits == 1);
+  CHECK(scenePass(&repeated) && repeated == pass && frameWaits == pacedFrames);
   float position[3], orientation[4], left, right, up, down;
   CHECK(viewPose(0, position, orientation) && viewAngles(1, &left, &right, &up, &down));
   uint32_t width, height; dimensions(&width, &height);
-  CHECK(width == sceneWidth && height == sceneHeight && pass->width == sceneWidth && pass->height == sceneHeight && frameWaits == 1 && displayTime() > 0.);
+  CHECK(width == sceneWidth && height == sceneHeight && pass->width == sceneWidth && pass->height == sceneHeight && frameWaits == pacedFrames && displayTime() > 0.);
   frame->eyes[0].transform.m[0][3] = 99.f;
   state.lockReady = mtx_init(&state.lock, mtx_plain) == thrd_success;
   CHECK(state.lockReady);
@@ -471,6 +559,47 @@ static bool sceneCanvas(void) {
   sceneCopies = sceneSubmissions = 0;
   CHECK(update() && scenePass(&repeated) && repeated == pass && submit());
   CHECK(vrState.scene.projection.visible[0] && vrState.scene.projection.visible[1]);
+  for (unsigned failure = 0; failure < 2; failure++) {
+    activeInputPose = true;
+    CHECK(update() && vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
+    sceneCopies = sceneSubmissions = 0;
+    CHECK(scenePass(&repeated) && repeated && submit());
+    unsigned hiddenBefore = sceneHideCalls;
+    failActions = failure == 0; failHaptic = failure == 1;
+    frameNow += .03;
+    CHECK(!update() && sceneHideCalls == hiddenBefore + 2);
+    CHECK(vrState.frame.updated && !vrState.frame.snapshot.head.valid && !vrState.inputSerial);
+    CHECK(!vrState.scene.captured && !vrState.scene.prepared && !vrState.scene.requested);
+    CHECK(!pose(DEVICE_HEAD, position, orientation) && orientation[3] == 0.f);
+    CHECK(!viewPose(0, position, orientation) && !viewPose(1, position, orientation));
+    CHECK(!vrState.scene.projection.visible[0] && !vrState.scene.projection.visible[1]);
+    runtimeHideFails = true;
+    if (failure) {
+      failHaptic = false; CHECK(update() && vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
+      failHaptic = true; frameNow += .03;
+    }
+    CHECK(!update() && strstr(lovrGetError(), failure ? "deferred haptic" : "action snapshot") &&
+      strstr(lovrGetError(), "HideOverlay"));
+    runtimeHideFails = failActions = failHaptic = false;
+    sceneCopies = sceneSubmissions = 0;
+    CHECK(update() && scenePass(&repeated) && repeated && submit());
+  }
+  vrState.runtime.system = &runtimeSystem;
+  unsigned recenterHides = sceneHideCalls;
+  graphicsEvent = EVREventType_VREvent_SeatedZeroPoseReset;
+  CHECK(pollEvents() && sceneHideCalls == recenterHides && vrState.frame.updated && vrState.inputSerial &&
+    vrState.scene.projection.visible[0] && vrState.scene.projection.visible[1]);
+  graphicsEvent = EVREventType_VREvent_StandingZeroPoseReset;
+  CHECK(pollEvents() && sceneHideCalls == recenterHides + 2 && vrState.frame.updated && !vrState.frame.snapshot.head.valid);
+  CHECK(!vrState.scene.projection.visible[0] && !vrState.scene.projection.visible[1]);
+  CHECK(!viewPose(0, position, orientation) && !pose(DEVICE_HEAD, position, orientation));
+  runtimeHideFails = true;
+  graphicsEvent = EVREventType_VREvent_StandingZeroPoseReset;
+  CHECK(!pollEvents() && strstr(lovrGetError(), "HideOverlay"));
+  runtimeHideFails = false;
+  vrState.events.inputFocus = true;
+  sceneCopies = sceneSubmissions = 0;
+  CHECK(update() && scenePass(&repeated) && repeated && submit());
   framePhotons = .1f;
   sceneCopies = sceneSubmissions = 0;
   CHECK(update() && scenePass(&repeated) && repeated && submit());
@@ -548,6 +677,76 @@ static bool sceneCanvas(void) {
   return true;
 }
 
+static bool inputCleared(void) {
+  bool value = true, changed = true;
+  float values[2] = { 9.f, 9.f }, p[3], q[4];
+  CHECK(!down(DEVICE_HAND_LEFT, BUTTON_TRIGGER, &value, &changed) && !value && !changed);
+  CHECK(!touched(DEVICE_HAND_LEFT, BUTTON_TRIGGER, &value) && !value);
+  CHECK(!axis(DEVICE_HAND_LEFT, AXIS_THUMBSTICK, values) && values[0] == 0.f && values[1] == 0.f);
+  CHECK(!axis(DEVICE_HAND_LEFT, AXIS_TRIGGER, values) && values[0] == 0.f);
+  CHECK(!pose(DEVICE_HAND_LEFT, p, q) && q[0] == 0.f && q[3] == 0.f);
+  return true;
+}
+static bool inputTransitions(void) {
+  memset(&vrState, 0, sizeof(vrState));
+  HeadsetConfig config = { .overlay = true, .supersample = 1.f };
+  CHECK(init(&config) && connect() && start());
+  vrState.runtime.system = &runtimeSystem;
+  vrState.runtime.overlay = &runtimeAPI;
+  lovrOpenVRFrameInit(&vrState.frame, &runtimeSystem, &runtimeAPI);
+  frameNow = 1.;
+  activeInputPose = inputActive = inputDown = inputChanged = true;
+  for (unsigned transition = 0; transition < 3; transition++) {
+    inputDown = transition != 2; inputChanged = transition != 1;
+    unsigned before = actionUpdates, digitalBefore = digitalReads, analogBefore = analogReads, poseBefore = poseReads;
+    CHECK(update() && actionUpdates == before + 1);
+    CHECK(digitalReads == digitalBefore + 4 * OPENVR_INPUT_BUTTON_COUNT &&
+      analogReads == analogBefore + 2 * OPENVR_INPUT_AXIS_COUNT && poseReads == poseBefore + 4);
+    inputDown = !inputDown; inputChanged = !inputChanged;
+    for (unsigned repeat = 0; repeat < 3; repeat++) {
+      bool value, changed;
+      float values[2];
+      CHECK(down(DEVICE_HAND_LEFT, BUTTON_TRIGGER, &value, &changed) && value == (transition != 2) && changed == (transition != 1));
+      CHECK(touched(DEVICE_HAND_RIGHT, BUTTON_TRIGGER, &value) && value == (transition != 2));
+      CHECK(axis(DEVICE_HAND_LEFT, AXIS_THUMBSTICK, values) && values[0] == .25f && values[1] == -.75f);
+      CHECK(axis(DEVICE_HAND_RIGHT, AXIS_TRIGGER, values) && values[0] == .25f);
+      CHECK(actionUpdates == before + 1 && digitalReads == digitalBefore + 4 * OPENVR_INPUT_BUTTON_COUNT &&
+        analogReads == analogBefore + 2 * OPENVR_INPUT_AXIS_COUNT && poseReads == poseBefore + 4);
+    }
+  }
+  failActions = true;
+  CHECK(!update() && inputCleared());
+  double acceptedNow = vrState.frame.lastNow, acceptedEpoch = vrState.frame.epoch;
+  double acceptedDisplayTime = vrState.frame.lastDisplayTime;
+  CHECK(vrState.frame.updated && displayTime() == 0. && deltaTime() == 0.);
+  failActions = false;
+  frameNow = acceptedNow - .02;
+  unsigned beforeRegression = actionUpdates;
+  CHECK(update() && inputCleared() && actionUpdates == beforeRegression);
+  CHECK(vrState.frame.lastNow == acceptedNow && vrState.frame.epoch == acceptedEpoch &&
+    vrState.frame.lastDisplayTime == acceptedDisplayTime);
+  frameNow = acceptedNow;
+  CHECK(update() && actionUpdates == beforeRegression + 1 && vrState.inputSerial &&
+    vrState.frame.snapshot.head.valid && vrState.frame.lastNow > acceptedNow && vrState.frame.epoch == acceptedEpoch);
+  graphicsEvent = EVREventType_VREvent_StandingZeroPoseReset;
+  acceptedNow = vrState.frame.lastNow; acceptedEpoch = vrState.frame.epoch;
+  acceptedDisplayTime = vrState.frame.lastDisplayTime;
+  CHECK(pollEvents() && inputCleared() && vrState.frame.updated);
+  CHECK(vrState.frame.lastNow == acceptedNow && vrState.frame.epoch == acceptedEpoch &&
+    vrState.frame.lastDisplayTime == acceptedDisplayTime);
+  frameNow = acceptedNow - .02;
+  beforeRegression = actionUpdates;
+  CHECK(update() && inputCleared() && actionUpdates == beforeRegression && vrState.frame.lastNow == acceptedNow);
+  frameNow = acceptedNow;
+  vrState.events.inputFocus = true;
+  CHECK(update());
+  stop();
+  CHECK(inputCleared() && start() && inputCleared());
+  CHECK(disconnect());
+  activeInputPose = inputActive = inputDown = inputChanged = false;
+  return true;
+}
+
 static bool scaledScene(void) {
   sceneScale = 1.5f;
   bool ok = sceneCanvas();
@@ -558,6 +757,7 @@ static bool scaledScene(void) {
 
 int main(int argc, char** argv) {
   NativeTest tests[] = {
+    { "openvr.backend.input-transitions", inputTransitions },
     { "openvr.backend.retained-graphics", retainedGraphics },
     { "openvr.backend.panel-canvas", panelCanvas },
     { "openvr.backend.scene-canvas", sceneCanvas },

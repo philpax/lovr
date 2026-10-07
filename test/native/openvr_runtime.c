@@ -21,6 +21,7 @@ static struct {
   struct VR_IVROverlay_FnTable overlay;
   struct VR_IVRInput_FnTable input;
   struct VR_IVRCompositor_FnTable compositor;
+  struct VR_IVRApplications_FnTable applications;
 } fake;
 
 static uint32_t LOVR_OPENVR_CALLTYPE fakeInit(EVRInitError* error, EVRApplicationType type, const char* startupInfo) {
@@ -52,11 +53,11 @@ static EVRInitError OPENVR_FNTABLE_CALLTYPE fakeSDK(uint32_t major, uint32_t min
 }
 
 static void* LOVR_OPENVR_CALLTYPE fakeInterface(const char* version, EVRInitError* error) {
-  const char* versions[] = { IVRSystem_Version, IVROverlay_Version, IVRInput_Version, IVRCompositor_Version };
-  void* tables[] = { &fake.system, &fake.overlay, &fake.input, &fake.compositor };
+  const char* versions[] = { IVRSystem_Version, IVROverlay_Version, IVRInput_Version, IVRCompositor_Version, IVRApplications_Version };
+  void* tables[] = { &fake.system, &fake.overlay, &fake.input, &fake.compositor, &fake.applications };
   unsigned int index = fake.interfaces++;
-  fake.validCalls &= fake.active && fake.validations == 1 && index < 4;
-  if (index >= 4) {
+  fake.validCalls &= fake.active && fake.validations == 1 && index < 5;
+  if (index >= 5) {
     *error = EVRInitError_VRInitError_Init_InvalidInterface;
     return NULL;
   }
@@ -87,7 +88,7 @@ static void resetFake(void) {
 }
 
 static bool cleared(const OpenVRRuntime* runtime) {
-  return !runtime->initialized && !runtime->system && !runtime->overlay && !runtime->input && !runtime->compositor &&
+  return !runtime->initialized && !runtime->system && !runtime->overlay && !runtime->input && !runtime->compositor && !runtime->applications &&
     !runtime->loader.init && !runtime->loader.shutdown && !runtime->loader.getInterface && !runtime->loader.isInterfaceVersionValid;
 }
 
@@ -96,8 +97,8 @@ static bool connectsOverlay(void) {
   OpenVRRuntime runtime = { 0 };
   EVRInitError error = lovrOpenVRConnect(&runtime, &loader);
   bool connected = error == EVRInitError_VRInitError_None && runtime.initialized && runtime.system == &fake.system &&
-    runtime.overlay == &fake.overlay && runtime.input == &fake.input && runtime.compositor == &fake.compositor;
-  bool calls = fake.inits == 1 && fake.shutdowns == 0 && fake.validations == 1 && fake.interfaces == 4 && fake.sdkCalls == 1;
+    runtime.overlay == &fake.overlay && runtime.input == &fake.input && runtime.compositor == &fake.compositor && runtime.applications == &fake.applications;
+  bool calls = fake.inits == 1 && fake.shutdowns == 0 && fake.validations == 1 && fake.interfaces == 5 && fake.sdkCalls == 1;
   lovrOpenVRDisconnect(&runtime);
   CHECK(connected);
   CHECK(calls);
@@ -116,7 +117,7 @@ static bool idempotentLifecycle(void) {
   OpenVRLoader invalid = { 0 };
   EVRInitError second = lovrOpenVRConnect(&runtime, &invalid);
   EVRInitError third = lovrOpenVRConnect(&runtime, NULL);
-  bool calls = fake.inits == 1 && fake.interfaces == 4 && fake.sdkCalls == 1 && fake.shutdowns == 0;
+  bool calls = fake.inits == 1 && fake.interfaces == 5 && fake.sdkCalls == 1 && fake.shutdowns == 0;
   lovrOpenVRDisconnect(&runtime);
   lovrOpenVRDisconnect(&runtime);
   CHECK(first == EVRInitError_VRInitError_None && second == first && third == first);
@@ -141,7 +142,7 @@ static bool exclusiveOwner(void) {
   lovrOpenVRDisconnect(&secondRuntime);
   lovrOpenVRDisconnect(&copied);
   bool retained = ownerRuntime.initialized && fake.active && fake.shutdowns == 0 && fake.inits == 1 &&
-    fake.interfaces == 4 && fake.sdkCalls == 1 && cleared(&secondRuntime) && cleared(&copied);
+    fake.interfaces == 5 && fake.sdkCalls == 1 && cleared(&secondRuntime) && cleared(&copied);
   EVRInitError stillConnected = lovrOpenVRConnect(&ownerRuntime, &loader);
   lovrOpenVRDisconnect(&ownerRuntime);
   CHECK(first == EVRInitError_VRInitError_None && stillConnected == first);
@@ -187,7 +188,7 @@ static bool versionFailure(void) {
 }
 
 static bool interfaceFailures(void) {
-  for (unsigned int i = 1; i <= 4; i++) {
+  for (unsigned int i = 1; i <= 5; i++) {
     for (unsigned int explicitError = 0; explicitError < 2; explicitError++) {
       resetFake();
       fake.failInterface = i;

@@ -1,5 +1,11 @@
 #include "headset/headset_layer.h"
 #include "headset/openvr_runtime.h"
+#include "headset/openvr_assets.h"
+#include "headset/openvr_input.h"
+#include "headset/openvr_events.h"
+#include "headset/openvr_haptics.h"
+#include "event/event.h"
+#include <unistd.h>
 #include "headset/openvr_overlay.h"
 #include "headset/openvr_vulkan.h"
 #include "headset/openvr_frame.h"
@@ -40,6 +46,11 @@ static struct {
   HeadsetConfig config;
   OpenVRRuntime runtime;
   OpenVRFrame frame;
+  OpenVRInput input;
+  OpenVREvents events;
+  OpenVRHaptics haptics;
+  uint64_t inputSerial;
+  bool inputReady;
   struct {
     OpenVRProjection projection;
     Texture* texture;
@@ -120,6 +131,22 @@ static bool projectionResult(OpenVRProjectionResult result) {
   return false;
 }
 
+static OpenVRProjectionResult invalidateFrame(void) {
+  lovrOpenVRInputClear(&state.input);
+  lovrOpenVRHapticsClear(&state.haptics);
+  state.inputSerial = 0;
+  memset(&state.frame.snapshot, 0, sizeof(state.frame.snapshot));
+  state.scene.captured = state.scene.prepared = state.scene.requested = false;
+  return lovrOpenVRProjectionHide(&state.scene.projection);
+}
+
+static bool failInputUpdate(const char* operation, EVRInputError error) {
+  OpenVRProjectionResult hidden = invalidateFrame();
+  lovrSetError("openvr: %s error %d; scene hide: %s eye %u error %d (cleanup %d)",
+    operation, error, hidden.operation ? hidden.operation : "ok", hidden.eye, hidden.error, hidden.cleanupError);
+  return false;
+}
+
 static bool retireScene(void) {
   if ((state.scene.projection.eyes[0] || state.scene.projection.eyes[1]) &&
       !projectionResult(lovrOpenVRProjectionDestroy(&state.scene.projection))) return false;
@@ -146,8 +173,22 @@ static bool cleanup(void) {
   return ok;
 }
 
+static void pushEventTransitions(const OpenVREventEffects* effects) {
+  if (effects->visibilityChanged) lovrEventPush((Event) { .type = EVENT_VISIBLE, .data.visible.visible = state.events.visible });
+  if (effects->inputFocusChanged) lovrEventPush((Event) { .type = EVENT_FOCUS,
+    .data.focus.focused = state.events.inputFocus, .data.focus.display = DISPLAY_HEADSET });
+  if (effects->activityChanged) lovrEventPush((Event) { .type = EVENT_MOUNT,
+    .data.mount.mounted = state.events.activityKnown && state.events.active });
+}
 static void stop(void) {
   state.generation = 0;
+  lovrOpenVRInputClear(&state.input);
+  lovrOpenVRHapticsClear(&state.haptics);
+  OpenVREventEffects effects;
+  lovrOpenVREventsStop(&state.events, &effects);
+  pushEventTransitions(&effects);
+  state.inputSerial = 0;
+  memset(&state.frame, 0, sizeof(state.frame));
   state.stopping = state.all != NULL || state.scene.projection.eyes[0] || state.scene.projection.eyes[1] ||
     state.scene.texture || state.scene.output[0] || state.scene.output[1] || state.scene.pass || state.stopping;
   if (state.scene.projection.eyes[0] || state.scene.projection.eyes[1])
@@ -169,6 +210,8 @@ static void stop(void) {
 static bool disconnect(void) {
   stop();
   if (!cleanup()) return false;
+  lovrOpenVRInputReset(&state.input);
+  state.inputReady = false;
   lovrOpenVRDisconnect(&state.runtime);
   return true;
 }
@@ -180,6 +223,7 @@ static bool init(HeadsetConfig* config) {
   state.clipNear = .01f;
   state.clipFar = 0.f;
   state.main = true;
+  lovrOpenVREventsReset(&state.events);
   state.initialized = true;
   return true;
 }
@@ -193,8 +237,36 @@ static void destroy(void) {
 
 static bool connect(void) {
   lovrAssert(state.initialized && state.config.overlay, "openvr: only overlay applications are supported");
+  if (state.runtime.initialized && state.inputReady) return true;
+  bool shared = false;
+#ifdef LOVR_OPENVR_SHARED
+  shared = LOVR_OPENVR_SHARED;
+#endif
+  OpenVRAssetsResult assets = lovrOpenVRAssetsResolve(shared, NULL);
+  if (assets.status != OPENVR_ASSETS_OK_PATHS_NOT_PINNED) {
+    lovrOpenVRInputReset(&state.input);
+    state.inputReady = false;
+    lovrOpenVRDisconnect(&state.runtime);
+    lovrSetError("openvr: action assets status %d at %s (errno %d)", assets.status, assets.failingPath, assets.osError);
+    return false;
+  }
   EVRInitError error = lovrOpenVRConnect(&state.runtime, NULL);
-  lovrAssert(error == EVRInitError_VRInitError_None, "openvr: runtime connection error %d", error);
+  if (error != EVRInitError_VRInitError_None) {
+    lovrOpenVRInputReset(&state.input);
+    state.inputReady = false;
+    lovrOpenVRDisconnect(&state.runtime);
+    lovrSetError("openvr: runtime connection error %d for manifest %s", error, assets.manifest);
+    return false;
+  }
+  EVRInputError inputError = lovrOpenVRInputInit(&state.input, state.runtime.input, assets.manifest);
+  if (inputError != EVRInputError_VRInputError_None) {
+    lovrOpenVRInputReset(&state.input);
+    state.inputReady = false;
+    lovrOpenVRDisconnect(&state.runtime);
+    lovrSetError("openvr: action manifest %s initialization error %d", assets.manifest, inputError);
+    return false;
+  }
+  state.inputReady = true;
   return true;
 }
 
@@ -206,7 +278,7 @@ static const char* driver(void) { return connected() ? "SteamVR" : NULL; }
 static bool seated(void) { return state.config.seated; }
 static uint32_t limit(void) { return MAX_LAYERS - 2; }
 static bool start(void) {
-  lovrAssert(connected(), "openvr: runtime is not connected");
+  lovrAssert(connected() && state.inputReady, "openvr: runtime input is not ready");
   if (active()) return true;
   if (!cleanup()) return false;
   lovrOpenVRFrameInit(&state.frame, state.runtime.system, state.runtime.overlay);
@@ -243,6 +315,9 @@ static Layer* layerCreate(const LayerInfo* info) {
   lovrAssert(active() && info && info->width && info->height && info->width <= INT32_MAX / 2 && info->height <= INT32_MAX,
     "openvr: invalid panel dimensions or inactive session");
   lovrAssert(info->filter, "openvr: nearest panel filtering is not supported; use the default filter");
+  uint32_t created = 0;
+  for (Layer* layer = state.all; layer; layer = layer->next) created++;
+  lovrAssert(created < limit(), "openvr: the created panel budget is exhausted");
   Layer* layer = lovrCalloc(sizeof(*layer));
   layer->ownership = (LayerHeader) { .ref = 1, .info = *info, .creator = &lovrHeadsetOpenVROps, .generation = state.generation };
   layer->origin = DEVICE_FLOOR;
@@ -442,8 +517,40 @@ static uint32_t createDevice(void* instance, void* info, void* allocator, uintpt
   return lovrOpenVRVulkanCreateDevice(&context, (VkInstance) instance, device, info, allocator, (VkDevice*) output);
 }
 
-static bool unsupported(void) { return false; }
-static bool pollEvents(void) { return connected(); }
+static bool mainVisible(void) { return !active() || !state.events.sampled || state.events.mainSceneVisible; }
+static bool visible(bool* main) {
+  if (main) *main = mainVisible();
+  return active() && state.events.sampled && state.events.visible;
+}
+static bool focused(void) { return active() && state.events.sampled && state.events.inputFocus; }
+static bool mounted(void) { return active() && state.events.sampled && state.events.activityKnown && state.events.active; }
+static bool pollEvents(void) {
+  if (!connected() || !state.inputReady) return false;
+  if (!active()) return true;
+  VROverlayHandle_t handles[MAX_LAYERS];
+  size_t count = 0;
+  for (unsigned eye = 0; eye < 2; eye++) if (state.scene.projection.eyes[eye]) handles[count++] = state.scene.projection.eyes[eye];
+  for (Layer* layer = state.all; layer; layer = layer->next)
+    if (layer->panel.handle) handles[count++] = layer->panel.handle;
+  OpenVREventEffects effects;
+  lovrOpenVREventsUpdate(&state.events, &state.runtime, state.inputReady, (uint32_t) getpid(), handles, count, &effects);
+  pushEventTransitions(&effects);
+  if (!state.events.inputFocus) {
+    lovrOpenVRInputClear(&state.input);
+    lovrOpenVRHapticsClear(&state.haptics);
+    state.inputSerial = 0;
+  }
+  bool ok = true;
+  if ((state.config.seated && effects.invalidateSeated) || (!state.config.seated && effects.invalidateStanding)) {
+    ok = projectionResult(invalidateFrame());
+    lovrEventPush((Event) { .type = EVENT_RECENTER });
+  }
+  if (effects.requestQuit) lovrEventPush((Event) { .type = EVENT_QUIT, .data.quit.exitCode = 0 });
+  return ok;
+}
+static EVRInputError hapticPulse(void* context, Device device, float strength, float duration, float frequency) {
+  return lovrOpenVRInputVibrate(context, device, strength, duration, frequency);
+}
 static double frameClock(void* context) { (void) context; return os_get_time(); }
 static bool update(void) {
   lovrAssert(active(), "openvr: frame update requires an active session");
@@ -452,8 +559,25 @@ static bool update(void) {
   state.scene.prepared = false;
   state.scene.requested = false;
   OpenVRFrameResult result = lovrOpenVRFrameUpdate(&state.frame, origin, frameClock, NULL);
-  if (result.status == OPENVR_FRAME_OK || result.status == OPENVR_FRAME_TIMEOUT) return true;
-  OpenVRProjectionResult hidden = lovrOpenVRProjectionHide(&state.scene.projection);
+  state.inputSerial = 0;
+  lovrOpenVRInputClear(&state.input);
+  if (result.status == OPENVR_FRAME_OK || result.status == OPENVR_FRAME_TIMEOUT) {
+    if (state.events.sampled && !state.events.inputFocus) {
+      lovrOpenVRHapticsClear(&state.haptics);
+      return true;
+    }
+    EVRInputError error = lovrOpenVRInputUpdate(&state.input, state.frame.snapshot.origin, state.frame.snapshot.prediction);
+    if (error != EVRInputError_VRInputError_None) return failInputUpdate("action snapshot", error);
+    for (unsigned hand = 0; hand < 2; hand++) {
+      if (!state.input.hands[hand].poses[0].bActive && !state.input.hands[hand].poses[1].bActive)
+        lovrOpenVRHapticsCancel(&state.haptics, hand ? DEVICE_HAND_RIGHT : DEVICE_HAND_LEFT);
+    }
+    error = lovrOpenVRHapticsTick(&state.haptics, state.generation, os_get_time(), hapticPulse, &state.input);
+    if (error != EVRInputError_VRInputError_None) return failInputUpdate("deferred haptic", error);
+    state.inputSerial = state.frame.snapshot.serial;
+    return true;
+  }
+  OpenVRProjectionResult hidden = invalidateFrame();
   if (result.status == OPENVR_FRAME_RUNTIME_ERROR) {
     lovrSetError("openvr: frame update error %d (overlay %d); scene hide: %s eye %u error %d (cleanup %d)",
       result.status, result.error, hidden.operation ? hidden.operation : "ok", hidden.eye, hidden.error, hidden.cleanupError);
@@ -482,16 +606,24 @@ static bool setRefreshRate(float rate) { (void) rate; return false; }
 static void getFoveation(FoveationLevel* level, bool* dynamic) { *level = FOVEATION_NONE; *dynamic = false; }
 static bool setFoveation(FoveationLevel level, bool dynamic) { (void) level; (void) dynamic; return false; }
 static bool isHDR(void) { return false; }
-static bool visible(bool* main) { if (main) *main = false; return false; }
 static bool passthroughSupported(PassthroughMode mode) { (void) mode; return false; }
 static PassthroughMode passthrough(void) { return PASSTHROUGH_TRANSPARENT; }
 static bool setPassthrough(PassthroughMode mode) { (void) mode; return false; }
 static uint32_t viewCount(void) { return active() ? 2 : 0; }
 static bool pose(Device device, float* position, float* orientation) {
-  (void) device;
   memset(position, 0, 3 * sizeof(float));
   memset(orientation, 0, 4 * sizeof(float));
-  return false;
+  if (!active()) return false;
+  if (device != DEVICE_HEAD) {
+    if (state.inputSerial && lovrOpenVRInputGetPose(&state.input, device, position, orientation)) return true;
+    memset(position, 0, 3 * sizeof(float));
+    memset(orientation, 0, 4 * sizeof(float));
+    return false;
+  }
+  if (!state.frame.snapshot.head.valid) return false;
+  memcpy(position, state.frame.snapshot.head.position, 3 * sizeof(float));
+  memcpy(orientation, state.frame.snapshot.head.orientation, 4 * sizeof(float));
+  return true;
 }
 static bool handPose(Side side, HandPose type, float* position, float* orientation) {
   memset(position, 0, 3 * sizeof(float));
@@ -529,29 +661,57 @@ static void setClip(float near, float far) {
 }
 static void bounds(float* width, float* depth) { *width = *depth = 0.f; }
 static bool velocity(Device device, float* linear, float* angular) {
-  (void) device; memset(linear, 0, 3 * sizeof(float)); memset(angular, 0, 3 * sizeof(float)); return false;
+  memset(linear, 0, 3 * sizeof(float)); memset(angular, 0, 3 * sizeof(float));
+  if (!active()) return false;
+  if (device != DEVICE_HEAD) return state.inputSerial &&
+    lovrOpenVRInputGetVelocity(&state.input, device, linear, angular);
+  if (!state.frame.snapshot.velocityValid) return false;
+  memcpy(linear, state.frame.snapshot.velocity, 3 * sizeof(float));
+  memcpy(angular, state.frame.snapshot.angularVelocity, 3 * sizeof(float));
+  return true;
 }
 static bool down(Device device, DeviceButton button, bool* value, bool* changed) {
-  (void) device; (void) button; *value = *changed = false; return false;
+  *value = *changed = false;
+  return active() && state.inputSerial && lovrOpenVRInputIsDown(&state.input, device, button, value, changed);
 }
-static bool touched(Device device, DeviceButton button, bool* value) { (void) device; (void) button; *value = false; return false; }
+static bool touched(Device device, DeviceButton button, bool* value) {
+  *value = false;
+  return active() && state.inputSerial && lovrOpenVRInputIsTouched(&state.input, device, button, value);
+}
 static bool axis(Device device, DeviceAxis axis, float* value) {
-  (void) device;
   value[0] = 0.f;
   if (axis == AXIS_THUMBSTICK || axis == AXIS_TOUCHPAD) value[1] = 0.f;
-  return false;
+  return active() && state.inputSerial && lovrOpenVRInputGetAxis(&state.input, device, axis, value);
 }
 static bool skeleton(Device device, float* poses, SkeletonSource* source) {
   (void) device; memset(poses, 0, HAND_JOINT_COUNT * 8 * sizeof(float)); *source = SOURCE_UNKNOWN; return false;
 }
 static bool battery(Device device, float* level, bool* charging) { (void) device; *level = 0.f; *charging = false; return false; }
-static bool vibrate(Device device, float strength, float duration, float frequency) {
-  (void) device; (void) strength; (void) duration; (void) frequency; return false;
+static Device hapticDevice(Device device) {
+  switch (device) {
+    case DEVICE_HAND_LEFT_GRIP:
+    case DEVICE_HAND_LEFT_POINT: return DEVICE_HAND_LEFT;
+    case DEVICE_HAND_RIGHT_GRIP:
+    case DEVICE_HAND_RIGHT_POINT: return DEVICE_HAND_RIGHT;
+    default: return device;
+  }
 }
-static void stopVibration(Device device) { (void) device; }
+static bool vibrate(Device device, float strength, float duration, float frequency) {
+  if (!active() || !state.inputReady || (state.events.sampled && !state.events.inputFocus)) return false;
+  EVRInputError error = lovrOpenVRHapticsSchedule(&state.haptics, state.generation, hapticDevice(device),
+    strength, duration, frequency, os_get_time(), hapticPulse, &state.input);
+  lovrAssert(error == EVRInputError_VRInputError_None, "openvr: haptic schedule error %d", error);
+  return true;
+}
+static void stopVibration(Device device) {
+  EVRInputError error = lovrOpenVRHapticsCancel(&state.haptics, hapticDevice(device));
+  if (error) lovrSetError("openvr: haptic cancel error %d", error);
+}
 static uint64_t* modelKeys(uint32_t* count) { *count = 0; return NULL; }
 static struct ModelData* modelData(uint64_t key) { (void) key; return NULL; }
-static bool modelPose(struct Model* model, float* position, float* orientation) { (void) model; return pose(DEVICE_HEAD, position, orientation); }
+static bool modelPose(struct Model* model, float* position, float* orientation) {
+  (void) model; memset(position, 0, 3 * sizeof(float)); memset(orientation, 0, 4 * sizeof(float)); return false;
+}
 static bool animate(struct Model* model) { (void) model; return false; }
 static Texture* background(uint32_t width, uint32_t height, uint32_t layers) { (void) width; (void) height; (void) layers; return NULL; }
 static bool acquireSceneTexture(Texture** texture) {
@@ -754,10 +914,10 @@ const HeadsetOps lovrHeadsetOpenVROps = {
   .HeadsetStop = stop,
   .HeadsetIsActive = active,
   .HeadsetGetSessionGeneration = generation,
-  .HeadsetIsMainSessionVisible = unsupported,
+  .HeadsetIsMainSessionVisible = mainVisible,
   .HeadsetIsVisible = visible,
-  .HeadsetIsFocused = unsupported,
-  .HeadsetIsMounted = unsupported,
+  .HeadsetIsFocused = focused,
+  .HeadsetIsMounted = mounted,
   .HeadsetPollEvents = pollEvents,
   .HeadsetUpdate = update,
   .HeadsetGetDisplayDimensions = dimensions,

@@ -81,6 +81,8 @@ static EVRInitError connect(OpenVRRuntime* runtime, const OpenVRLoader* loader) 
   if (error != EVRInitError_VRInitError_None) goto fail;
   runtime->compositor = getInterface(runtime, IVRCompositor_Version, &error);
   if (error != EVRInitError_VRInitError_None) goto fail;
+  runtime->applications = getInterface(runtime, IVRApplications_Version, &error);
+  if (error != EVRInitError_VRInitError_None) goto fail;
 
   return EVRInitError_VRInitError_None;
 

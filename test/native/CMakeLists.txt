@@ -280,7 +280,7 @@ set_tests_properties(headset.harness headset.harness.discovery headset.harness.f
 if(LOVR_ENABLE_OPENVR)
   add_subdirectory(openvr_assets_staged)
 
-  foreach(helper IN ITEMS frame projection)
+  foreach(helper IN ITEMS frame projection events haptics)
     add_executable(headset_openvr_${helper}_tests openvr_${helper}.c ../../src/modules/headset/openvr_${helper}.c)
     target_include_directories(headset_openvr_${helper}_tests PRIVATE ../../src ../../src/modules)
     target_include_directories(headset_openvr_${helper}_tests SYSTEM PRIVATE ../../deps/openvr/headers)

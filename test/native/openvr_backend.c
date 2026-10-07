@@ -1,7 +1,106 @@
-#include "test.h"
-#ifndef LOVR_OPENVR_GRAPHICS_HARNESS
-#include "../../src/modules/headset/headset_openvr.c"
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
 #endif
+#define canonicalize libcCanonicalize
+#include <math.h>
+#undef canonicalize
+#include "test.h"
+#include "headset/openvr_assets.h"
+static OpenVRAssetsResult backendAssetsResolve(bool shared, const OpenVRAssetsProvider* provider);
+#ifndef LOVR_OPENVR_GRAPHICS_HARNESS
+#define lovrOpenVRAssetsResolve backendAssetsResolve
+#include "../../src/modules/headset/headset_openvr.c"
+#undef lovrOpenVRAssetsResolve
+#endif
+#define getPose inputGetPose
+#include "../../src/modules/headset/openvr_input.c"
+#undef getPose
+#define getHand hapticsGetHand
+#include "../../src/modules/headset/openvr_haptics.c"
+#undef getHand
+#define reduce eventsReduce
+#include "../../src/modules/headset/openvr_events.c"
+#undef reduce
+#define validate assetsValidate
+#include "../../src/modules/headset/openvr_assets.c"
+#undef validate
+static Event backendEvents[32];
+static unsigned backendEventCount;
+void lovrEventPush(Event event) {
+  if (backendEventCount >= 32) abort();
+  backendEvents[backendEventCount++] = event;
+}
+
+static bool failAssets, failManifest, failActions, failHaptic, activeInputPose;
+static unsigned manifests, actionUpdates, quitAcks, digitalReads, analogReads, poseReads;
+static bool inputActive, inputDown, inputChanged;
+static void OPENVR_FNTABLE_CALLTYPE backendAck(void) { quitAcks++; }
+static OpenVRAssetsStatus backendArtifact(void* context, bool shared, char* path, size_t capacity, int* error) {
+  (void) context; (void) shared; (void) capacity;
+  if (failAssets) { *error = 13; return OPENVR_ASSETS_ACCESS_DENIED; }
+  strcpy(path, "/managed/lovr");
+  return OPENVR_ASSETS_OK_PATHS_NOT_PINNED;
+}
+static OpenVRAssetsStatus backendCanonical(void* context, const char* path, char* output, size_t capacity, int* error) {
+  (void) context; (void) capacity; (void) error; strcpy(output, path); return OPENVR_ASSETS_OK_PATHS_NOT_PINNED;
+}
+static OpenVRAssetsStatus backendInspect(void* context, const char* path, OpenVRAssetMetadata* metadata, int* error) {
+  (void) context; (void) error;
+  *metadata = (OpenVRAssetMetadata) { .kind = strstr(path, ".json") ? OPENVR_ASSET_REGULAR : OPENVR_ASSET_DIRECTORY,
+    .permissions = 0755, .trustedOwner = true, .readable = true };
+  return OPENVR_ASSETS_OK_PATHS_NOT_PINNED;
+}
+static OpenVRAssetsResult backendAssetsResolve(bool shared, const OpenVRAssetsProvider* provider) {
+  (void) provider;
+  OpenVRAssetsProvider fake = { NULL, backendArtifact, backendCanonical, backendInspect };
+  return lovrOpenVRAssetsResolve(shared, &fake);
+}
+static EVRInputError OPENVR_FNTABLE_CALLTYPE backendManifest(char* path) {
+  if (strcmp(path, "/managed/lovr-openvr/actions.json")) abort();
+  manifests++;
+  return failManifest ? EVRInputError_VRInputError_InvalidParam : EVRInputError_VRInputError_None;
+}
+static EVRInputError OPENVR_FNTABLE_CALLTYPE backendSet(char* path, VRActionSetHandle_t* handle) {
+  (void) path; *handle = 1; return 0;
+}
+static EVRInputError OPENVR_FNTABLE_CALLTYPE backendAction(char* path, VRActionHandle_t* handle) {
+  (void) path; *handle = 1; return 0;
+}
+static EVRInputError OPENVR_FNTABLE_CALLTYPE backendSource(char* path, VRInputValueHandle_t* handle) {
+  *handle = strstr(path, "left") ? 1 : 2; return 0;
+}
+static EVRInputError OPENVR_FNTABLE_CALLTYPE backendActions(VRActiveActionSet_t* sets, uint32_t size, uint32_t count) {
+  (void) sets; (void) size; (void) count;
+  if (!manifests) abort();
+  actionUpdates++;
+  return failActions ? EVRInputError_VRInputError_InvalidHandle : 0;
+}
+static EVRInputError OPENVR_FNTABLE_CALLTYPE backendDigital(VRActionHandle_t handle, InputDigitalActionData_t* data, uint32_t size, VRInputValueHandle_t source) {
+  (void) handle; (void) size; (void) source;
+  digitalReads++;
+  *data = (InputDigitalActionData_t) { .bActive = inputActive, .bState = inputDown, .bChanged = inputChanged }; return 0;
+}
+static EVRInputError OPENVR_FNTABLE_CALLTYPE backendAnalog(VRActionHandle_t handle, InputAnalogActionData_t* data, uint32_t size, VRInputValueHandle_t source) {
+  (void) handle; (void) size; (void) source;
+  analogReads++;
+  *data = (InputAnalogActionData_t) { .bActive = inputActive, .x = .25f, .y = -.75f }; return 0;
+}
+static EVRInputError OPENVR_FNTABLE_CALLTYPE backendInputPose(VRActionHandle_t handle, ETrackingUniverseOrigin origin, float prediction, InputPoseActionData_t* data, uint32_t size, VRInputValueHandle_t source) {
+  (void) handle; (void) origin; (void) prediction; (void) size; (void) source;
+  poseReads++;
+  *data = (InputPoseActionData_t) { .bActive = activeInputPose,
+    .pose = { .bDeviceIsConnected = activeInputPose, .bPoseIsValid = activeInputPose,
+      .mDeviceToAbsoluteTracking = { .m = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 } } } } };
+  return 0;
+}
+static EVRInputError OPENVR_FNTABLE_CALLTYPE backendHaptic(VRActionHandle_t handle, float start, float duration, float frequency, float strength, VRInputValueHandle_t source) {
+  (void) handle; (void) start; (void) duration; (void) frequency; (void) strength; (void) source;
+  return failHaptic ? EVRInputError_VRInputError_InvalidHandle : 0;
+}
+static struct VR_IVRInput_FnTable backendInput = { .SetActionManifestPath = backendManifest,
+  .GetActionSetHandle = backendSet, .GetActionHandle = backendAction, .GetInputSourceHandle = backendSource,
+  .UpdateActionState = backendActions, .GetDigitalActionData = backendDigital, .GetAnalogActionData = backendAnalog,
+  .GetPoseActionDataRelativeToNow = backendInputPose, .TriggerHapticVibrationAction = backendHaptic };
 #include <stdlib.h>
 #ifndef LOVR_OPENVR_GRAPHICS_HARNESS
 #include "../../src/modules/headset/openvr_frame.c"
@@ -80,7 +179,7 @@ bool lovrGraphicsHandoffTexture(Texture* texture, lovrGraphicsExternalCallback c
 #endif
 uint32_t lovrHeadsetNextSessionGeneration(void) { return ++nextGeneration; }
 EVRInitError lovrOpenVRConnect(OpenVRRuntime* runtime, const OpenVRLoader* loader) {
-  (void) loader; runtime->initialized = true; return EVRInitError_VRInitError_None;
+  (void) loader; runtime->initialized = true; runtime->input = &backendInput; return EVRInitError_VRInitError_None;
 }
 void lovrOpenVRDisconnect(OpenVRRuntime* runtime) {
   if (runtime->initialized) {
@@ -295,6 +394,126 @@ static bool unsupportedOutputs(void) {
   CHECK(disconnect());
   return true;
 }
+static bool connectionTransaction(void) {
+  memset(&state, 0, sizeof(state));
+  HeadsetConfig config = { .overlay = true, .supersample = 1.f };
+  CHECK(init(&config));
+  failAssets = true;
+  CHECK(!connect() && !connected() && !state.inputReady && !state.input.api);
+  CHECK(strstr(lovrGetError(), "errno 13"));
+  failAssets = false; failManifest = true;
+  unsigned before = shutdowns;
+  CHECK(!connect() && shutdowns == before + 1 && !state.input.api);
+  CHECK(strstr(lovrGetError(), "/managed/lovr-openvr/actions.json"));
+  failManifest = false;
+  CHECK(connect() && state.inputReady && start());
+  VRActionHandle_t handle = state.input.actions[0];
+  state.input.hands[0].buttons[0].bActive = true;
+  state.inputSerial = 9;
+  stop();
+  CHECK(state.inputReady && state.input.actions[0] == handle && !state.inputSerial && !state.input.hands[0].buttons[0].bActive);
+  CHECK(start() && state.input.actions[0] == handle);
+  CHECK(disconnect() && !state.inputReady && !state.input.api && !state.input.actions[0]);
+  return true;
+}
+static bool snapshotRoutes(void) {
+  begin();
+  state.frame.snapshot.head.valid = state.frame.snapshot.velocityValid = true;
+  state.frame.snapshot.head.position[1] = 1.5f;
+  state.frame.snapshot.head.orientation[3] = 1.f;
+  state.frame.snapshot.velocity[0] = 2.f;
+  state.inputSerial = 1;
+  InputPoseActionData_t* grip = &state.input.hands[0].poses[0];
+  *grip = (InputPoseActionData_t) { .bActive = true, .pose = { .bDeviceIsConnected = true, .bPoseIsValid = true,
+    .mDeviceToAbsoluteTracking = { .m = { { 1, 0, 0, 3 }, { 0, 1, 0, 4 }, { 0, 0, 1, 5 } } } } };
+  state.input.hands[0].poses[1] = *grip;
+  state.input.hands[0].poses[1].pose.mDeviceToAbsoluteTracking.m[0][3] = 6;
+  float p[3], q[4], v[3], a[3];
+  state.frame.snapshot.head.valid = false;
+  CHECK(!pose(DEVICE_HEAD, p, q) && p[0] == 0.f && q[0] == 0.f && q[3] == 0.f);
+  state.frame.snapshot.head.valid = true;
+  CHECK(pose(DEVICE_HEAD, p, q) && p[1] == 1.5f && q[3] == 1.f);
+  CHECK(velocity(DEVICE_HEAD, v, a) && v[0] == 2.f);
+  CHECK(pose(DEVICE_HAND_LEFT, p, q) && p[0] == 3.f);
+  CHECK(pose(DEVICE_HAND_LEFT_POINT, p, q) && p[0] == 6.f);
+  grip->pose.mDeviceToAbsoluteTracking.m[0][0] = NAN;
+  CHECK(!pose(DEVICE_HAND_LEFT, p, q) && p[0] == 0.f && q[0] == 0.f && q[3] == 0.f);
+  grip->pose.mDeviceToAbsoluteTracking.m[0][0] = 1.f;
+  CHECK(!pose(DEVICE_HAND_RIGHT, p, q) && q[3] == 0.f);
+  CHECK(!modelPose(NULL, p, q) && p[0] == 0.f && q[3] == 0.f);
+  CHECK(vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 0.f) && state.haptics.hands[0].active);
+  stopVibration(DEVICE_HAND_LEFT);
+  CHECK(!state.haptics.hands[0].active);
+  Device aliases[] = { DEVICE_HAND_LEFT_GRIP, DEVICE_HAND_LEFT_POINT, DEVICE_HAND_RIGHT_GRIP, DEVICE_HAND_RIGHT_POINT };
+  for (unsigned i = 0; i < 4; i++) {
+    CHECK(vibrate(aliases[i], .5f, 1.f, 0.f) && state.haptics.hands[i / 2].active);
+    stopVibration(aliases[i]);
+    CHECK(!state.haptics.hands[i / 2].active);
+  }
+  CHECK(vibrate(DEVICE_HAND_RIGHT, .5f, 1.f, 120.f));
+  stop();
+  CHECK(!pose(DEVICE_HEAD, p, q) && p[0] == 0.f && q[3] == 0.f && !state.haptics.hands[1].active);
+  CHECK(!pose(DEVICE_HAND_LEFT, p, q) && q[3] == 0.f);
+  CHECK(!velocity(DEVICE_HAND_LEFT, v, a) && v[0] == 0.f);
+  CHECK(disconnect());
+  return true;
+}
+static unsigned eventPolls;
+static uint32_t queuedEvent;
+static bool OPENVR_FNTABLE_CALLTYPE backendPoll(struct VREvent_t* event, uint32_t size) {
+  (void) size;
+  if (!manifests) abort();
+  eventPolls++;
+  if (!queuedEvent) return false;
+  *event = (struct VREvent_t) { .eventType = queuedEvent, .data.process.pid = (uint32_t) getpid() };
+  queuedEvent = 0;
+  return true;
+}
+static bool eventIntegration(void) {
+  begin();
+  struct VR_IVRSystem_FnTable system = { .PollNextEvent = backendPoll, .AcknowledgeQuit_Exiting = backendAck };
+  quitAcks = 0;
+  state.runtime.system = &system;
+  backendEventCount = eventPolls = 0;
+  state.inputReady = false;
+  CHECK(!pollEvents() && !eventPolls);
+  state.inputReady = true;
+  CHECK(pollEvents() && eventPolls == 1 && mainVisible() && !visible(NULL) && !focused() && !mounted());
+  CHECK(backendEventCount == 3 && backendEvents[0].type == EVENT_VISIBLE &&
+    backendEvents[1].type == EVENT_FOCUS && backendEvents[2].type == EVENT_MOUNT);
+  state.frame.updated = state.frame.snapshot.head.valid = true;
+  state.inputSerial = 4;
+  state.haptics.hands[0].active = true;
+  CHECK(!vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
+  CHECK(pollEvents() && !state.inputSerial && !state.haptics.hands[0].active);
+  queuedEvent = EVREventType_VREvent_StandingZeroPoseReset;
+  CHECK(pollEvents() && backendEvents[3].type == EVENT_RECENTER);
+  CHECK(state.frame.updated && !state.frame.snapshot.head.valid && !state.inputSerial && !state.haptics.hands[0].active);
+  queuedEvent = EVREventType_VREvent_Quit;
+  CHECK(pollEvents() && backendEvents[4].type == EVENT_QUIT);
+  CHECK(pollEvents() && backendEventCount == 5);
+  state.events.visible = state.events.inputFocus = state.events.activityKnown = state.events.active = true;
+  stop();
+  CHECK(state.events.quitRequested && backendEventCount == 8);
+  CHECK(backendEvents[5].type == EVENT_VISIBLE && !backendEvents[5].data.visible.visible);
+  CHECK(backendEvents[6].type == EVENT_FOCUS && !backendEvents[6].data.focus.focused);
+  CHECK(backendEvents[7].type == EVENT_MOUNT && !backendEvents[7].data.mount.mounted);
+  stop();
+  CHECK(backendEventCount == 8);
+  unsigned before = eventPolls;
+  CHECK(pollEvents() && eventPolls == before && !visible(NULL) && mainVisible());
+  CHECK(start() && !quitAcks);
+  queuedEvent = EVREventType_VREvent_ProcessQuit;
+  CHECK(pollEvents() && !quitAcks);
+  CHECK(disconnect() && !quitAcks);
+  CHECK(connect() && start());
+  state.runtime.system = &system;
+  queuedEvent = EVREventType_VREvent_ProcessQuit;
+  CHECK(pollEvents() && !quitAcks);
+  destroy();
+  CHECK(!quitAcks);
+  return true;
+}
 static bool invalidScale(void) {
   float scales[] = { 0.f, -1.f, NAN, INFINITY };
   for (unsigned i = 0; i < sizeof(scales) / sizeof(scales[0]); i++) {
@@ -323,7 +542,10 @@ int main(int argc, char** argv) {
     { "openvr.backend.unsupported-outputs", unsupportedOutputs },
     { "openvr.backend.stereo-immutable-transport", stereoTransport },
     { "openvr.backend.borrowed-config", borrowedConfig },
-    { "openvr.backend.invalid-scale", invalidScale }
+    { "openvr.backend.invalid-scale", invalidScale },
+    { "openvr.backend.connection-transaction", connectionTransaction },
+    { "openvr.backend.snapshot-routes", snapshotRoutes },
+    { "openvr.backend.events-recenter", eventIntegration }
   };
   return nativeRunTests(argc, argv, tests, sizeof(tests) / sizeof(tests[0]));
 }
