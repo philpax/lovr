@@ -3,6 +3,30 @@
 #include "../../src/modules/headset/headset_openvr.c"
 #endif
 #include <stdlib.h>
+#ifndef LOVR_OPENVR_GRAPHICS_HARNESS
+#include "../../src/modules/headset/openvr_frame.c"
+
+static OpenVRProjectionResult projectionStatus(void) {
+  return (OpenVRProjectionResult) { .status = OPENVR_PROJECTION_OK };
+}
+OpenVRProjectionResult lovrOpenVRProjectionCreate(OpenVRProjection* projection,
+    struct VR_IVROverlay_FnTable* api, const char* keys[2], const char* names[2], const OpenVRProjectionConfig* config) {
+  (void) projection; (void) api; (void) keys; (void) names; (void) config; abort();
+}
+OpenVRProjectionResult lovrOpenVRProjectionConfigure(OpenVRProjection* projection, const OpenVRProjectionConfig* config) {
+  (void) projection; (void) config; abort();
+}
+OpenVRProjectionResult lovrOpenVRProjectionShow(OpenVRProjection* projection) { (void) projection; abort(); }
+OpenVRProjectionResult lovrOpenVRProjectionHide(OpenVRProjection* projection) { (void) projection; return projectionStatus(); }
+OpenVRProjectionResult lovrOpenVRProjectionDestroy(OpenVRProjection* projection) { (void) projection; return projectionStatus(); }
+bool lovrOpenVRProjectionHandoff(const gpu_external_image* image, void* data) { (void) image; (void) data; abort(); }
+bool lovrOpenVRProjectionPanelOrder(uint32_t mainOrder, uint32_t panelIndex, uint32_t* order) {
+  if (mainOrder == UINT32_MAX || panelIndex >= UINT32_MAX - mainOrder) return false;
+  *order = mainOrder + 1 + panelIndex;
+  return true;
+}
+double os_get_time(void) { return 1.; }
+#endif
 
 static unsigned shutdowns, nextGeneration;
 #ifndef LOVR_OPENVR_VALIDATE_CONFIG
@@ -24,6 +48,7 @@ void lovrGraphicsInvalidateSessionTexture(Texture* texture) { if (texture) abort
 bool lovrGraphicsRegisterSessionPass(Pass* pass) { (void) pass; abort(); }
 bool lovrGraphicsRegisterSessionTexture(Texture* texture) { (void) texture; abort(); }
 Texture* lovrTextureCreate(const TextureInfo* info) { (void) info; abort(); }
+const TextureInfo* lovrTextureGetInfo(Texture* texture) { (void) texture; abort(); }
 void lovrTextureDestroy(void* ref) { (void) ref; abort(); }
 Pass* lovrPassCreate(const char* label) { (void) label; abort(); }
 void lovrPassDestroy(void* ref) { (void) ref; abort(); }
@@ -132,7 +157,7 @@ static void begin(void) {
   memset(&state, 0, sizeof(state));
   failWait = failDestroy = failProperty = false;
   waits = destroys = shutdowns = hides = 0;
-  HeadsetConfig config = { .overlay = true };
+  HeadsetConfig config = { .overlay = true, .supersample = 1.f };
   if (!init(&config) || !connect() || !start()) abort();
 }
 static Layer* wrapper(void) {
@@ -160,15 +185,16 @@ static bool atomicLists(void) {
   Layer* a = wrapper();
   Layer* b = wrapper();
   Layer* list[] = { a, b };
-  CHECK(setLayers(list, 2, false));
-  CHECK(atomic_load(&a->ownership.ref) == 2);
+  CHECK(setLayers(list, 2, true));
+  CHECK(state.main && atomic_load(&a->ownership.ref) == 2);
   b->ownership.generation--;
   CHECK(!setLayers(list + 1, 1, false));
-  CHECK(state.count == 2 && state.layers[0] == a && atomic_load(&a->ownership.ref) == 2);
+  CHECK(state.count == 2 && state.main && state.layers[0] == a && atomic_load(&a->ownership.ref) == 2);
   b->ownership.generation++;
   CHECK(setLayers(state.layers, 2, false));
   CHECK(atomic_load(&a->ownership.ref) == 2);
-  CHECK(!setLayers(list, 2, true));
+  CHECK(!state.main);
+  CHECK(setLayers(list, 2, true) && state.main);
   stop();
   lovrRelease(a, layerDestroy); lovrRelease(b, layerDestroy);
   CHECK(disconnect());
@@ -241,7 +267,7 @@ static bool stereoTransport(void) {
 static bool borrowedConfig(void) {
   memset(&state, 0, sizeof(state));
   char extensions[] = "VK_TEST_extension";
-  HeadsetConfig config = { .overlay = true, .extensions = extensions, .extensionCount = 1 };
+  HeadsetConfig config = { .overlay = true, .supersample = 1.f, .extensions = extensions, .extensionCount = 1 };
   CHECK(init(&config) && connect() && start());
   CHECK(state.config.extensions == extensions);
   Layer* layer = wrapper();
@@ -262,10 +288,29 @@ static bool unsupportedOutputs(void) {
   float p[3] = { 9, 9, 9 }, q[4] = { 9, 9, 9, 9 };
   CHECK(!pose(DEVICE_HEAD, p, q) && p[0] == 0.f && q[3] == 0.f);
   Texture* texture = (Texture*) 1;
-  CHECK(!sceneTexture(&texture) && !texture);
+  CHECK(sceneTexture(&texture) && !texture);
   HeadsetFeatures output;
   features(&output);
   CHECK(output.overlay && !output.handTracking && !output.depthSubmission && !output.layerFilter);
+  CHECK(disconnect());
+  return true;
+}
+static bool invalidScale(void) {
+  float scales[] = { 0.f, -1.f, NAN, INFINITY };
+  for (unsigned i = 0; i < sizeof(scales) / sizeof(scales[0]); i++) {
+    memset(&state, 0, sizeof(state));
+    HeadsetConfig config = { .overlay = true, .supersample = scales[i] };
+    CHECK(!init(&config) && !state.initialized);
+  }
+  begin();
+  state.config.supersample = 1e30f;
+  state.frame.updated = true;
+  state.frame.snapshot.width = 64; state.frame.snapshot.height = 32;
+  state.frame.snapshot.head.valid = true;
+  state.frame.snapshot.eyes[0].pose.valid = state.frame.snapshot.eyes[1].pose.valid = true;
+  Texture* texture;
+  CHECK(!sceneTexture(&texture) && !texture && !state.scene.texture);
+  CHECK(strstr(lovrGetError(), "dimensions"));
   CHECK(disconnect());
   return true;
 }
@@ -277,7 +322,8 @@ int main(int argc, char** argv) {
     { "openvr.backend.property-failure", propertyFailure },
     { "openvr.backend.unsupported-outputs", unsupportedOutputs },
     { "openvr.backend.stereo-immutable-transport", stereoTransport },
-    { "openvr.backend.borrowed-config", borrowedConfig }
+    { "openvr.backend.borrowed-config", borrowedConfig },
+    { "openvr.backend.invalid-scale", invalidScale }
   };
   return nativeRunTests(argc, argv, tests, sizeof(tests) / sizeof(tests[0]));
 }

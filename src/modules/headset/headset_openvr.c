@@ -2,10 +2,13 @@
 #include "headset/openvr_runtime.h"
 #include "headset/openvr_overlay.h"
 #include "headset/openvr_vulkan.h"
+#include "headset/openvr_frame.h"
+#include "headset/openvr_projection.h"
 #include "graphics/graphics.h"
 #include "graphics/graphics_session.h"
 #include "graphics/graphics_external.h"
 #include "core/gpu.h"
+#include "core/os.h"
 #include "data/image.h"
 #include "core/maf.h"
 #include "util.h"
@@ -36,6 +39,17 @@ struct Layer {
 static struct {
   HeadsetConfig config;
   OpenVRRuntime runtime;
+  OpenVRFrame frame;
+  struct {
+    OpenVRProjection projection;
+    Texture* texture;
+    Texture* output[2];
+    Pass* pass;
+    OpenVRFrameSnapshot render;
+    bool captured;
+    bool prepared;
+    bool requested;
+  } scene;
   Layer* all;
   Layer* layers[MAX_LAYERS];
   uint32_t count;
@@ -44,6 +58,7 @@ static struct {
   PFN_vkEnumeratePhysicalDevices enumeratePhysicalDevices;
   bool initialized;
   bool stopping;
+  bool main;
   float clipNear;
   float clipFar;
 } state;
@@ -99,10 +114,29 @@ static void layerDestroy(void* ref) {
   }
 }
 
+static bool projectionResult(OpenVRProjectionResult result) {
+  if (result.status == OPENVR_PROJECTION_OK) return true;
+  lovrSetError("openvr: %s: projection eye %u error %d (cleanup %d)", result.operation ? result.operation : "projection", result.eye, result.error, result.cleanupError);
+  return false;
+}
+
+static bool retireScene(void) {
+  if ((state.scene.projection.eyes[0] || state.scene.projection.eyes[1]) &&
+      !projectionResult(lovrOpenVRProjectionDestroy(&state.scene.projection))) return false;
+  lovrGraphicsInvalidateSessionPass(state.scene.pass);
+  lovrGraphicsInvalidateSessionTexture(state.scene.texture);
+  for (unsigned eye = 0; eye < 2; eye++) lovrGraphicsInvalidateSessionTexture(state.scene.output[eye]);
+  lovrRelease(state.scene.pass, lovrPassDestroy);
+  lovrRelease(state.scene.texture, lovrTextureDestroy);
+  for (unsigned eye = 0; eye < 2; eye++) lovrRelease(state.scene.output[eye], lovrTextureDestroy);
+  memset(&state.scene, 0, sizeof(state.scene));
+  return true;
+}
+
 static bool cleanup(void) {
   if (!state.stopping) return true;
   if (!lovrGraphicsQuiesceSessionResources()) return false;
-  bool ok = true;
+  bool ok = retireScene();
   for (Layer* layer = state.all, *next; layer; layer = next) {
     next = layer->next;
     if (!retireLayer(layer)) ok = false;
@@ -114,12 +148,16 @@ static bool cleanup(void) {
 
 static void stop(void) {
   state.generation = 0;
-  state.stopping = state.all != NULL || state.stopping;
+  state.stopping = state.all != NULL || state.scene.projection.eyes[0] || state.scene.projection.eyes[1] ||
+    state.scene.texture || state.scene.output[0] || state.scene.output[1] || state.scene.pass || state.stopping;
+  if (state.scene.projection.eyes[0] || state.scene.projection.eyes[1])
+    projectionResult(lovrOpenVRProjectionHide(&state.scene.projection));
   for (Layer* layer = state.all; layer; layer = layer->next) {
     if (layer->panel.handle) panelResult(lovrOpenVRPanelHide(&layer->panel));
   }
   uint32_t count = state.count;
   state.count = 0;
+  state.main = false;
   for (uint32_t i = 0; i < count; i++) {
     Layer* layer = state.layers[i];
     state.layers[i] = NULL;
@@ -137,9 +175,11 @@ static bool disconnect(void) {
 
 static bool init(HeadsetConfig* config) {
   lovrAssert(config && !state.initialized, "openvr: backend is already initialized or config is null");
+  lovrAssert(isfinite(config->supersample) && config->supersample > 0.f, "openvr: supersample must be finite and positive");
   state.config = *config;
   state.clipNear = .01f;
   state.clipFar = 0.f;
+  state.main = true;
   state.initialized = true;
   return true;
 }
@@ -169,6 +209,8 @@ static bool start(void) {
   lovrAssert(connected(), "openvr: runtime is not connected");
   if (active()) return true;
   if (!cleanup()) return false;
+  lovrOpenVRFrameInit(&state.frame, state.runtime.system, state.runtime.overlay);
+  state.main = true;
   state.generation = lovrHeadsetNextSessionGeneration();
   return state.generation != 0;
 }
@@ -237,13 +279,12 @@ fail:
 
 static Layer** getLayers(uint32_t* count, bool* main) {
   *count = state.count;
-  *main = false;
+  *main = state.main;
   return state.layers;
 }
 
 static bool setLayers(Layer** layers, uint32_t count, bool main) {
   lovrAssert(active() && count <= limit() && (!count || layers), "openvr: invalid layer submission");
-  lovrAssert(!main, "openvr: projection presentation is not implemented");
   for (uint32_t i = 0; i < count; i++) {
     if (!current(layers[i])) return false;
     for (uint32_t j = 0; j < i; j++) lovrAssert(layers[i] != layers[j], "openvr: duplicate layer submission");
@@ -254,6 +295,7 @@ static bool setLayers(Layer** layers, uint32_t count, bool main) {
   for (uint32_t i = 0; i < count; i++) lovrRetain(layers[i]);
   if (count) memmove(state.layers, layers, count * sizeof(*layers));
   state.count = count;
+  state.main = main;
   for (uint32_t i = 0; i < previousCount; i++) lovrRelease(previous[i], layerDestroy);
   return true;
 }
@@ -402,10 +444,40 @@ static uint32_t createDevice(void* instance, void* info, void* allocator, uintpt
 
 static bool unsupported(void) { return false; }
 static bool pollEvents(void) { return connected(); }
-static bool update(void) { return active(); }
-static void dimensions(uint32_t* width, uint32_t* height) { *width = *height = 0; }
+static double frameClock(void* context) { (void) context; return os_get_time(); }
+static bool update(void) {
+  lovrAssert(active(), "openvr: frame update requires an active session");
+  ETrackingUniverseOrigin origin = state.config.seated ? ETrackingUniverseOrigin_TrackingUniverseSeated : ETrackingUniverseOrigin_TrackingUniverseStanding;
+  state.scene.captured = false;
+  state.scene.prepared = false;
+  state.scene.requested = false;
+  OpenVRFrameResult result = lovrOpenVRFrameUpdate(&state.frame, origin, frameClock, NULL);
+  if (result.status == OPENVR_FRAME_OK || result.status == OPENVR_FRAME_TIMEOUT) return true;
+  OpenVRProjectionResult hidden = lovrOpenVRProjectionHide(&state.scene.projection);
+  if (result.status == OPENVR_FRAME_RUNTIME_ERROR) {
+    lovrSetError("openvr: frame update error %d (overlay %d); scene hide: %s eye %u error %d (cleanup %d)",
+      result.status, result.error, hidden.operation ? hidden.operation : "ok", hidden.eye, hidden.error, hidden.cleanupError);
+    return false;
+  }
+  return projectionResult(hidden);
+}
+static bool scaledDimensions(uint32_t sourceWidth, uint32_t sourceHeight, uint32_t* width, uint32_t* height) {
+  double w = (double) sourceWidth * state.config.supersample;
+  double h = (double) sourceHeight * state.config.supersample;
+  *width = *height = 0;
+  lovrAssert(isfinite(w) && isfinite(h) && w >= 1. && h >= 1. && w <= UINT32_MAX && h <= UINT32_MAX,
+    "openvr: scaled scene dimensions are invalid or overflow");
+  *width = (uint32_t) w;
+  *height = (uint32_t) h;
+  return true;
+}
+static void dimensions(uint32_t* width, uint32_t* height) {
+  *width = *height = 0;
+  if (state.frame.snapshot.width && state.frame.snapshot.height)
+    scaledDimensions(state.frame.snapshot.width, state.frame.snapshot.height, width, height);
+}
 static float* refreshRates(uint32_t* count) { *count = 0; return NULL; }
-static float refreshRate(void) { return 0.f; }
+static float refreshRate(void) { return state.frame.snapshot.frequency; }
 static bool setRefreshRate(float rate) { (void) rate; return false; }
 static void getFoveation(FoveationLevel* level, bool* dynamic) { *level = FOVEATION_NONE; *dynamic = false; }
 static bool setFoveation(FoveationLevel level, bool dynamic) { (void) level; (void) dynamic; return false; }
@@ -414,7 +486,7 @@ static bool visible(bool* main) { if (main) *main = false; return false; }
 static bool passthroughSupported(PassthroughMode mode) { (void) mode; return false; }
 static PassthroughMode passthrough(void) { return PASSTHROUGH_TRANSPARENT; }
 static bool setPassthrough(PassthroughMode mode) { (void) mode; return false; }
-static uint32_t viewCount(void) { return 0; }
+static uint32_t viewCount(void) { return active() ? 2 : 0; }
 static bool pose(Device device, float* position, float* orientation) {
   (void) device;
   memset(position, 0, 3 * sizeof(float));
@@ -430,9 +502,23 @@ static bool handPose(Side side, HandPose type, float* position, float* orientati
     : (side == SIDE_LEFT ? DEVICE_HAND_LEFT_POINT : DEVICE_HAND_RIGHT_POINT);
   return pose(device, position, orientation);
 }
-static bool viewPose(uint32_t view, float* position, float* orientation) { (void) view; return pose(DEVICE_HEAD, position, orientation); }
+static bool viewPose(uint32_t view, float* position, float* orientation) {
+  memset(position, 0, 3 * sizeof(float));
+  memset(orientation, 0, 4 * sizeof(float));
+  if (view >= 2 || !active() || !state.frame.snapshot.eyes[view].pose.valid) return false;
+  memcpy(position, state.frame.snapshot.eyes[view].pose.position, 3 * sizeof(float));
+  memcpy(orientation, state.frame.snapshot.eyes[view].pose.orientation, 4 * sizeof(float));
+  return true;
+}
 static bool viewAngles(uint32_t view, float* left, float* right, float* up, float* down) {
-  (void) view; *left = *right = *up = *down = 0.f; return false;
+  *left = *right = *up = *down = 0.f;
+  if (view >= 2 || !active() || !state.frame.updated || !state.frame.snapshot.eyes[view].pose.valid) return false;
+  const float* tangents = state.frame.snapshot.eyes[view].tangents;
+  *left = -atanf(tangents[0]);
+  *right = atanf(tangents[1]);
+  *up = atanf(tangents[3]);
+  *down = -atanf(tangents[2]);
+  return true;
 }
 static void getClip(float* near, float* far) { *near = state.clipNear; *far = state.clipFar; }
 static void setClip(float near, float far) {
@@ -468,8 +554,73 @@ static struct ModelData* modelData(uint64_t key) { (void) key; return NULL; }
 static bool modelPose(struct Model* model, float* position, float* orientation) { (void) model; return pose(DEVICE_HEAD, position, orientation); }
 static bool animate(struct Model* model) { (void) model; return false; }
 static Texture* background(uint32_t width, uint32_t height, uint32_t layers) { (void) width; (void) height; (void) layers; return NULL; }
-static bool sceneTexture(Texture** texture) { *texture = NULL; return false; }
-static bool scenePass(Pass** pass) { *pass = NULL; return false; }
+static bool acquireSceneTexture(Texture** texture) {
+  *texture = NULL;
+  lovrAssert(active(), "openvr: scene texture requires an active session");
+  if (!state.frame.updated || !state.frame.snapshot.head.valid ||
+      !state.frame.snapshot.eyes[0].pose.valid || !state.frame.snapshot.eyes[1].pose.valid) return true;
+  if (!state.scene.captured) {
+    state.scene.render = state.frame.snapshot;
+    if (!scaledDimensions(state.frame.snapshot.width, state.frame.snapshot.height,
+        &state.scene.render.width, &state.scene.render.height)) return false;
+    state.scene.captured = true;
+  }
+  uint32_t width = state.scene.render.width;
+  uint32_t height = state.scene.render.height;
+  lovrAssert(width && height, "openvr: scene dimensions are unavailable");
+  if (state.scene.texture) {
+    const TextureInfo* info = lovrTextureGetInfo(state.scene.texture);
+    lovrAssert(info->width == width && info->height == height, "openvr: scene dimensions changed; restart the headset session");
+  } else {
+    state.scene.texture = newTexture(width, height, true);
+    if (!state.scene.texture) return false;
+  }
+  for (unsigned eye = 0; eye < 2; eye++) {
+    if (!state.scene.output[eye]) state.scene.output[eye] = newTexture(width, height, false);
+    if (!state.scene.output[eye]) return false;
+  }
+  *texture = state.scene.texture;
+  return true;
+}
+static bool sceneTexture(Texture** texture) {
+  if (!acquireSceneTexture(texture)) return false;
+  if (*texture) state.scene.requested = true;
+  return true;
+}
+static bool scenePass(Pass** pass) {
+  *pass = NULL;
+  Texture* texture;
+  if (!acquireSceneTexture(&texture)) return false;
+  if (!texture) return true;
+  if (state.scene.prepared) { *pass = state.scene.pass; return true; }
+  if (!state.scene.pass) {
+    state.scene.pass = lovrPassCreate("OpenVR scene");
+    if (!state.scene.pass) return false;
+    if (!lovrGraphicsRegisterSessionPass(state.scene.pass)) {
+      lovrRelease(state.scene.pass, lovrPassDestroy);
+      state.scene.pass = NULL;
+      return false;
+    }
+  }
+  float clear[4][4] = { 0 };
+  LoadAction loads[4] = { LOAD_CLEAR };
+  if (!lovrPassSetClear(state.scene.pass, loads, clear, LOAD_CLEAR, 0.f)) return false;
+  Canvas canvas = { .color[0].texture = texture, .depthFormat = state.config.stencil ? FORMAT_D24S8 : FORMAT_D32F,
+    .samples = state.config.antialias ? 4 : 1 };
+  if (!lovrPassSetCanvas(state.scene.pass, &canvas)) return false;
+  for (unsigned eye = 0; eye < 2; eye++) {
+    float view[16], projection[16];
+    mat4_init(view, state.scene.render.eyes[eye].pose.matrix);
+    mat4_invert(view);
+    if (!lovrOpenVRFrameProjection(state.scene.render.eyes[eye].tangents, state.clipNear, state.clipFar, projection) ||
+        !lovrPassSetViewMatrix(state.scene.pass, eye, view) || !lovrPassSetProjection(state.scene.pass, eye, projection)) return false;
+  }
+  state.scene.prepared = true;
+  state.scene.requested = true;
+  *pass = state.scene.pass;
+  return true;
+}
+static bool depthTexture(Texture** texture) { *texture = NULL; return false; }
 static bool handoff(const gpu_external_image* image, void* data) {
   Layer* layer = data;
   VRVulkanTextureData_t vulkan = {
@@ -484,19 +635,84 @@ static bool handoff(const gpu_external_image* image, void* data) {
   lovrAssert(error == EVROverlayError_VROverlayError_None, "openvr: texture submission error %d", error);
   return true;
 }
+static bool submitScene(void) {
+  OpenVRProjection* projection = &state.scene.projection;
+  if (!state.main || !state.scene.requested || !state.scene.captured || !state.scene.texture || !state.scene.output[0] || !state.scene.output[1] ||
+      !state.scene.render.head.valid || !state.scene.render.eyes[0].pose.valid || !state.scene.render.eyes[1].pose.valid) {
+    return !(projection->eyes[0] || projection->eyes[1]) || projectionResult(lovrOpenVRProjectionHide(projection));
+  }
+  OpenVRProjectionConfig config = {
+    .origin = state.scene.render.origin,
+    .colorSpace = EColorSpace_ColorSpace_Gamma,
+    .order = state.config.overlayOrder
+  };
+  for (unsigned eye = 0; eye < 2; eye++) {
+    const OpenVRFrameEye* view = &state.scene.render.eyes[eye];
+    config.poses[eye] = view->transform;
+    config.frusta[eye] = (VROverlayProjection_t) { view->tangents[0], view->tangents[1], view->tangents[2], view->tangents[3] };
+  }
+  if (!projection->eyes[0] && !projection->eyes[1]) {
+    char keys[2][96];
+    unsigned long long serial = (unsigned long long) ++state.serial;
+    for (unsigned eye = 0; eye < 2; eye++) snprintf(keys[eye], sizeof(keys[eye]), "lovr.scene.%u.%llu.%u", state.generation, serial, eye);
+    const char* keyPointers[2] = { keys[0], keys[1] };
+    const char* names[2] = { "LÖVR scene left", "LÖVR scene right" };
+    if (!projectionResult(lovrOpenVRProjectionCreate(projection, state.runtime.overlay, keyPointers, names, &config))) return false;
+  }
+  if (!projection->eyes[0] || !projection->eyes[1]) {
+    lovrSetError("openvr: partial scene overlay creation requires a headset session restart");
+    return false;
+  }
+  if (!projectionResult(lovrOpenVRProjectionConfigure(projection, &config))) return false;
+  uint32_t extent[3] = { state.scene.render.width, state.scene.render.height, 1 };
+  for (unsigned eye = 0; eye < 2; eye++) {
+    uint32_t source[4] = { 0, 0, eye, 0 }, target[4] = { 0 };
+    if (!lovrTextureCopy(state.scene.texture, state.scene.output[eye], source, target, extent)) return false;
+    OpenVRProjectionHandoff handoff = { .projection = projection, .eye = eye };
+    if (!lovrGraphicsHandoffTexture(state.scene.output[eye], lovrOpenVRProjectionHandoff, &handoff, NULL)) {
+      if (handoff.result.status != OPENVR_PROJECTION_OK) projectionResult(handoff.result);
+      return false;
+    }
+  }
+  OpenVRProjectionResult shown = lovrOpenVRProjectionShow(projection);
+  if (shown.status == OPENVR_PROJECTION_OK) return true;
+  OpenVRProjectionResult hidden = lovrOpenVRProjectionHide(projection);
+  lovrSetError("openvr: %s: projection eye %u error %d (cleanup %d); rollback: %s eye %u error %d (cleanup %d)",
+    shown.operation ? shown.operation : "show", shown.eye, shown.error, shown.cleanupError,
+    hidden.operation ? hidden.operation : "ok", hidden.eye, hidden.error, hidden.cleanupError);
+  return false;
+}
+
 static bool submit(void) {
   lovrAssert(active(), "openvr: presentation is stopped");
+  bool ok = submitScene();
+  char sceneError[1024] = { 0 };
+  if (!ok) snprintf(sceneError, sizeof(sceneError), "%s", lovrGetError());
+  OpenVRPanelResult omitted = { .status = OPENVR_PANEL_OK };
   for (Layer* layer = state.all; layer; layer = layer->next) {
     bool included = false;
     for (uint32_t i = 0; i < state.count; i++) included |= state.layers[i] == layer;
-    if (!included && layer->panel.handle && !panelResult(lovrOpenVRPanelHide(&layer->panel))) return false;
+    if (!included && layer->panel.handle) {
+      OpenVRPanelResult hidden = lovrOpenVRPanelHide(&layer->panel);
+      if (hidden.status != OPENVR_PANEL_OK) {
+        if (omitted.status == OPENVR_PANEL_OK) omitted = hidden;
+        else omitted.cleanupError = hidden.error;
+      }
+    }
   }
+  if (omitted.status != OPENVR_PANEL_OK) {
+    lovrSetError("%s; openvr: omitted panel: %s error %d (cleanup %d)", ok ? "openvr: scene submitted" : sceneError,
+      omitted.operation ? omitted.operation : "hide", omitted.error, omitted.cleanupError);
+    return false;
+  }
+  if (!ok) { lovrSetError("%s", sceneError); return false; }
   for (uint32_t i = 0; i < state.count; i++) {
     Layer* layer = state.layers[i];
     if (!current(layer)) return false;
     OpenVRPanelConfig properties = layer->properties;
-    properties.order = state.config.overlayOrder + i;
-    if (properties.order < state.config.overlayOrder) { lovrSetError("openvr: overlay sort order overflow"); return false; }
+    if (!lovrOpenVRProjectionPanelOrder(state.config.overlayOrder, i, &properties.order)) {
+      lovrSetError("openvr: overlay sort order overflow"); return false;
+    }
     if (!configure(layer, &properties)) return false;
     if (!layer->frozen || layer->viewportDirty) {
       uint32_t extent[3] = { layer->ownership.info.width, layer->ownership.info.height, 1 };
@@ -519,7 +735,9 @@ static bool submit(void) {
 }
 static void setDevicePose(Device device, float* position, float* orientation) { (void) device; (void) position; (void) orientation; }
 static void setButton(Device device, DeviceButton button, bool down) { (void) device; (void) button; (void) down; }
-static double timeZero(void) { return 0.; }
+static double displayTime(void) { return state.frame.snapshot.displayTime; }
+static double displayPeriod(void) { return state.frame.snapshot.displayPeriod; }
+static double deltaTime(void) { return state.frame.snapshot.delta; }
 
 const HeadsetOps lovrHeadsetOpenVROps = {
   .HeadsetInit = init,
@@ -599,8 +817,8 @@ const HeadsetOps lovrHeadsetOpenVROps = {
   .HeadsetGetVulkanPhysicalDevice = physicalDevice,
   .HeadsetCreateVulkanInstance = createInstance,
   .HeadsetCreateVulkanDevice = createDevice,
-  .HeadsetGetDisplayTime = timeZero,
-  .HeadsetGetDisplayPeriod = timeZero,
-  .HeadsetGetDeltaTime = timeZero,
-  .HeadsetGetDepthTexture = sceneTexture
+  .HeadsetGetDisplayTime = displayTime,
+  .HeadsetGetDisplayPeriod = displayPeriod,
+  .HeadsetGetDeltaTime = deltaTime,
+  .HeadsetGetDepthTexture = depthTexture
 };

@@ -89,6 +89,31 @@ if(GPU_TESTS_ENABLED)
   endif()
 endif()
 if(OPENVR_ENABLED)
+  foreach(helper IN ITEMS frame projection)
+    file(READ "${CMAKE_CURRENT_LIST_DIR}/openvr_${helper}.c" helper_source)
+    string(REGEX MATCH "NativeTest[ \t\r\n]+tests\\[\\][ \t\r\n]*=[ \t\r\n]*\\{[^;]*\\};" helper_test_list "${helper_source}")
+    string(REGEX MATCHALL "\\{[ \t\r\n]*\"[^\"]+\"[ \t\r\n]*," helper_case_entries "${helper_test_list}")
+    if(NOT helper_case_entries)
+      message(FATAL_ERROR "No OpenVR ${helper} regression cases found")
+    endif()
+    foreach(entry IN LISTS helper_case_entries)
+      string(REGEX MATCH "\"([^\"]+)\"" helper_case_match "${entry}")
+      list(APPEND expected_names headset.openvr.${helper}.${CMAKE_MATCH_1})
+    endforeach()
+    list(APPEND expected_names headset.openvr.${helper}.discovery)
+  endforeach()
+  foreach(suite IN ITEMS backend backend_graphics)
+    file(READ "${CMAKE_CURRENT_LIST_DIR}/openvr_${suite}.c" backend_source)
+    string(REGEX MATCH "NativeTest[ \t\r\n]+tests\\[\\][ \t\r\n]*=[ \t\r\n]*\\{[^;]*\\};" backend_test_list "${backend_source}")
+    string(REGEX MATCHALL "\\{[ \t\r\n]*\"openvr\\.backend\\.[^\"]+\"[ \t\r\n]*," backend_case_entries "${backend_test_list}")
+    if(NOT backend_case_entries)
+      message(FATAL_ERROR "No OpenVR ${suite} regression cases found")
+    endif()
+    foreach(entry IN LISTS backend_case_entries)
+      string(REGEX MATCH "\"([^\"]+)\"" backend_case_match "${entry}")
+      list(APPEND expected_names headset.${CMAKE_MATCH_1})
+    endforeach()
+  endforeach()
   list(APPEND expected_names
     headset.openvr.overlay-sdk-fntables headset.openvr.idempotent-lifecycle headset.openvr.exclusive-owner
     headset.openvr.init-failure-cleanup-retry headset.openvr.version-failure-cleanup
@@ -106,10 +131,6 @@ if(OPENVR_ENABLED)
     headset.openvr.assets.asset_file_failures headset.openvr.assets.asset_directory_failures
     headset.openvr.assets.relative_artifact_rejected_after_cwd_change headset.openvr.assets.asset_error_context
     headset.openvr.assets.discovery
-    headset.openvr.backend.never-submitted-restart headset.openvr.backend.atomic-lists
-    headset.openvr.backend.cleanup-retries headset.openvr.backend.property-failure
-    headset.openvr.backend.unsupported-outputs headset.openvr.backend.stereo-immutable-transport
-    headset.openvr.backend.borrowed-config headset.openvr.backend.retained-graphics
     headset.openvr.backend.discovery headset.openvr.backend.graphics-discovery
     headset.openvr.assets.staged.shared headset.openvr.assets.staged.relative-rejected
     headset.openvr.assets.staged.standalone)

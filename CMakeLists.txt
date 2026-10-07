@@ -465,6 +465,8 @@ if(LOVR_ENABLE_OPENVR)
     src/modules/headset/openvr_runtime.c
     src/modules/headset/openvr_vulkan.c
     src/modules/headset/openvr_overlay.c
+    src/modules/headset/openvr_projection.c
+    src/modules/headset/openvr_frame.c
     src/modules/headset/openvr_input.c
     src/modules/headset/openvr_assets.c
     src/modules/headset/headset_openvr.c
