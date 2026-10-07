@@ -1,0 +1,149 @@
+{
+  "controller_type": "vive_controller",
+  "name": "L\u00d6VR vive_controller provisional bindings",
+  "description": "Pose paths checked against official SteamVR controller profiles. runtime behavior remains unverified; unavailable actions remain unsupported.",
+  "bindings": {
+    "/actions/lovr": {
+      "poses": [
+        {
+          "output": "/actions/lovr/in/grip_pose",
+          "path": "/user/hand/left/pose/grip"
+        },
+        {
+          "output": "/actions/lovr/in/aim_pose",
+          "path": "/user/hand/left/pose/tip"
+        },
+        {
+          "output": "/actions/lovr/in/grip_pose",
+          "path": "/user/hand/right/pose/grip"
+        },
+        {
+          "output": "/actions/lovr/in/aim_pose",
+          "path": "/user/hand/right/pose/tip"
+        }
+      ],
+      "haptics": [
+        {
+          "output": "/actions/lovr/out/haptic",
+          "path": "/user/hand/left/output/haptic"
+        },
+        {
+          "output": "/actions/lovr/out/haptic",
+          "path": "/user/hand/right/output/haptic"
+        }
+      ],
+      "sources": [
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/lovr/in/trigger_axis"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/trigger"
+            }
+          },
+          "parameters": {
+            "click_activate_threshold": "0.75",
+            "click_deactivate_threshold": "0.7"
+          }
+        },
+        {
+          "path": "/user/hand/left/input/trackpad",
+          "mode": "trackpad",
+          "inputs": {
+            "position": {
+              "output": "/actions/lovr/in/touchpad_axis"
+            },
+            "click": {
+              "output": "/actions/lovr/in/touchpad"
+            },
+            "touch": {
+              "output": "/actions/lovr/in/touchpad_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/grip",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/grip"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/application_menu",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/menu"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/lovr/in/trigger_axis"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/trigger"
+            }
+          },
+          "parameters": {
+            "click_activate_threshold": "0.75",
+            "click_deactivate_threshold": "0.7"
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trackpad",
+          "mode": "trackpad",
+          "inputs": {
+            "position": {
+              "output": "/actions/lovr/in/touchpad_axis"
+            },
+            "click": {
+              "output": "/actions/lovr/in/touchpad"
+            },
+            "touch": {
+              "output": "/actions/lovr/in/touchpad_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/grip",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/grip"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/application_menu",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/menu"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

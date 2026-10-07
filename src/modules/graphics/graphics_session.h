@@ -15,6 +15,8 @@ bool lovrGraphicsRegisterSessionPass(Pass* pass);
 void lovrGraphicsInvalidateSessionTexture(Texture* texture);
 void lovrGraphicsInvalidateSessionPass(Pass* pass);
 void lovrGraphicsInvalidateSessionResources(void);
+bool lovrGraphicsQuiesceSessionResources(void);
+bool lovrGraphicsDrainSessionResources(void);
 bool lovrGraphicsPrepareSessionTeardown(void);
 
 #endif

@@ -1,4 +1,5 @@
 #include "graphics/graphics.h"
+#include "graphics/graphics_external.h"
 #include "graphics/graphics_session.h"
 #include "data/blob.h"
 #include "data/image.h"
@@ -89,8 +90,10 @@ struct Texture {
   bool xrAcquired;
   bool sessionOwned;
   bool sessionDead;
+  bool externalFailed;
   Texture* sessionNext;
   Texture** sessionPrev;
+  Texture* externalDestroyNext;
   Sync* sync;
   gpu_texture* gpu;
   gpu_texture* sampleViewFloat;
@@ -222,6 +225,7 @@ static_assert(offsetof(MaterialData, alphaCutoff) == offsetof(ModelMaterial, alp
 
 struct Material {
   atomic_uint ref;
+  Material* externalDestroyNext;
   bool sessionDead;
   uint32_t index;
   MaterialBlock* block;
@@ -612,6 +616,9 @@ static thread_local struct {
 } thread;
 
 static atomic_uint ref;
+static _Thread_local bool externalHandoff;
+static _Thread_local Texture* externalDestroyTextures;
+static _Thread_local Material* externalDestroyMaterials;
 
 static struct {
   bool initialized;
@@ -628,6 +635,7 @@ static struct {
   atomic_uint textureMemory;
   mtx_t lock;
   bool lockReady;
+  atomic_bool submissionFailed;
   gpu_stream* stream;
   gpu_barrier barrier;
   gpu_barrier streamBarrier;
@@ -675,6 +683,7 @@ static BufferView getBuffer(gpu_buffer_type type, uint32_t size, size_t align);
 static void recycleBlocks(BufferAllocator* allocator, BufferBlock* blocks);
 static void destroyBuffers(BufferAllocator* allocator);
 static void pollReadbacks(void);
+static bool submitLocked(Pass** passes, uint32_t count);
 static Layout* getLayout(gpu_slot* slots, uint32_t count);
 static gpu_bundle* getBundle(Layout* layout, gpu_binding* bindings, uint32_t count);
 static bool getBundles(Layout* layout, gpu_bundle** bundles, uint32_t count);
@@ -697,6 +706,8 @@ static void updateModelTransforms(Model* model, uint32_t nodeIndex, float* paren
 static bool checkShaderFeatures(uint32_t* features, uint32_t count);
 static void onResize(uint32_t width, uint32_t height);
 static void onMessage(void* context, const char* message);
+static bool lockQueue(void* context);
+static void unlockQueue(void* context);
 
 // Entry
 
@@ -704,16 +715,24 @@ static Texture* sessionTextures;
 static Pass* sessionPasses;
 
 bool lovrTextureIsValid(Texture* texture) {
-  return texture && !texture->sessionDead;
+  return texture && !texture->sessionDead && !texture->externalFailed &&
+    (!texture->root || (!texture->root->sessionDead && !texture->root->externalFailed));
 }
 
 bool lovrPassIsValid(Pass* pass) {
   return pass && !pass->sessionDead;
 }
 
+static bool checkGraphicsReentry(void) {
+  if (!externalHandoff) return true;
+  lovrSetError("Graphics reentry is unavailable during external handoff");
+  return false;
+}
+
 static bool checkTextureSession(Texture* texture) {
+  if (!checkGraphicsReentry()) return false;
   if (texture && !lovrTextureIsValid(texture)) {
-    lovrSetError("Texture belongs to an invalidated headset session");
+    lovrSetError("Texture belongs to an invalidated headset session or failed external handoff");
     return false;
   }
   return true;
@@ -811,6 +830,8 @@ bool lovrGraphicsInit(GraphicsConfig* config) {
     .fnLog = onMessage,
     .fnAlloc = lovrMalloc,
     .fnFree = lovrFree,
+    .fnQueueLock = lockQueue,
+    .fnQueueUnlock = unlockQueue,
     .engineName = "LOVR",
     .engineVersion = { LOVR_VERSION_MAJOR, LOVR_VERSION_MINOR, LOVR_VERSION_PATCH },
     .device = &state.device,
@@ -1017,6 +1038,10 @@ fail:
 }
 
 void lovrGraphicsDestroy(void) {
+  if (externalHandoff) {
+    lovrSetError("Graphics teardown is unavailable during external handoff");
+    return;
+  }
   if (!lovrModuleRelease(&ref)) {
     lovrFree(thread.stack.memory);
     memset(&thread, 0, sizeof(thread));
@@ -1889,16 +1914,25 @@ static void syncAttachment(Texture* texture, bool depth, bool resolve, bool load
 }
 
 bool lovrGraphicsSubmit(Pass** passes, uint32_t count) {
+  if (externalHandoff || state.submissionFailed) {
+    lovrSetError("Graphics submission is unavailable");
+    return false;
+  }
   for (uint32_t i = 0; i < count; i++) {
     if (!checkPassSession(passes[i])) return false;
   }
-  // We might be submitting a command that copies GPU data to a readback, but there might be an
-  // older readback that references the same buffer.  We poll readbacks to avoid a situation where
-  // a submitted command overwrites buffer data that hasn't been copied to CPU memory yet.
   pollReadbacks();
-
   mtx_lock(&state.lock);
+  bool success = submitLocked(passes, count);
+  mtx_unlock(&state.lock);
+  return success;
+}
 
+static bool submitLocked(Pass** passes, uint32_t count) {
+  if (state.submissionFailed || !state.stream) {
+    lovrSetError("Graphics submission is unavailable");
+    return false;
+  }
   size_t stack = stackPush(&thread.stack);
 
   bool xrCanvas = false;
@@ -1915,8 +1949,9 @@ bool lovrGraphicsSubmit(Pass** passes, uint32_t count) {
 
   if (state.streamBarrier.prev != 0 && state.streamBarrier.next != 0) {
     gpu_stream* stream = streams[streamCount++] = gpu_stream_begin(NULL);
+    lovrAssertGoto(fail, stream, "Failed to begin command buffer: %s", gpu_get_error());
     gpu_sync(stream, &state.streamBarrier, 1);
-    gpu_stream_end(stream);
+    lovrAssertGoto(fail, gpu_stream_end(stream), "Failed to end GPU command buffer: %s", gpu_get_error());
   }
 
   streams[streamCount++] = state.stream;
@@ -2011,6 +2046,7 @@ bool lovrGraphicsSubmit(Pass** passes, uint32_t count) {
   for (uint32_t i = 0; i < count; i++) {
     Pass* pass = passes[i];
     gpu_stream* stream = streams[streamCount++] = gpu_stream_begin(pass->label);
+    lovrAssertGoto(fail, stream, "Failed to begin command buffer: %s", gpu_get_error());
 
     gpu_timestamp_writes computeTimestamps = { 0 };
     gpu_timestamp_writes renderTimestamps = { 0 };
@@ -2190,16 +2226,77 @@ bool lovrGraphicsSubmit(Pass** passes, uint32_t count) {
   memset(&state.barrier, 0, sizeof(gpu_barrier));
   memset(&state.streamBarrier, 0, sizeof(gpu_barrier));
   stackPop(&thread.stack, stack);
-  mtx_unlock(&state.lock);
   return true;
 fail:
   stackPop(&thread.stack, stack);
   state.newPipelines = NULL;
-  mtx_unlock(&state.lock);
+  state.submissionFailed = true;
   return false;
 }
 
+bool lovrGraphicsHandoffTexture(Texture* texture, lovrGraphicsExternalCallback callback, void* data, uint32_t* completion) {
+  gpu_external_image image;
+  if (externalHandoff || !state.initialized || !state.lockReady || state.submissionFailed ||
+      !callback || !lovrTextureIsValid(texture) || texture->root != texture || !texture->gpu ||
+      !gpu_texture_get_external_image(texture->gpu, &image)) {
+    lovrSetError("Graphics external handoff requires an available owned root texture and callback");
+    return false;
+  }
+
+  lovrRetain(texture);
+  pollReadbacks();
+  mtx_lock(&state.lock);
+  externalHandoff = true;
+  bool success = false;
+  if (state.submissionFailed || !lovrTextureIsValid(texture) || texture->root != texture || !texture->gpu ||
+      !gpu_texture_get_external_image(texture->gpu, &image)) {
+    lovrSetError("Graphics external handoff requires an available owned root texture");
+    goto done;
+  }
+  if (!submitLocked(NULL, 0)) goto fail;
+  if (!gpu_texture_external_barrier(state.stream, texture->gpu, true)) {
+    lovrSetError("Graphics external begin barrier failed: %s", gpu_get_error());
+    goto fail;
+  }
+  if (!submitLocked(NULL, 0)) goto fail;
+
+  bool callbackSuccess = callback(&image, data);
+  if (!gpu_texture_external_barrier(state.stream, texture->gpu, false)) {
+    lovrSetError("Graphics external restoration barrier failed: %s", gpu_get_error());
+    goto fail;
+  }
+  uint32_t tick = state.tick;
+  if (!submitLocked(NULL, 0)) goto fail;
+  if (completion) *completion = tick;
+  success = callbackSuccess;
+  if (!success) lovrSetError("Graphics external runtime callback failed");
+  goto done;
+
+fail:
+  texture->externalFailed = true;
+  state.submissionFailed = true;
+done:
+  externalHandoff = false;
+  mtx_unlock(&state.lock);
+  while (externalDestroyTextures) {
+    Texture* destroyed = externalDestroyTextures;
+    externalDestroyTextures = destroyed->externalDestroyNext;
+    lovrTextureDestroy(destroyed);
+  }
+  while (externalDestroyMaterials) {
+    Material* destroyed = externalDestroyMaterials;
+    externalDestroyMaterials = destroyed->externalDestroyNext;
+    lovrMaterialDestroy(destroyed);
+  }
+  lovrRelease(texture, lovrTextureDestroy);
+  return success;
+}
+
 bool lovrGraphicsPresent(void) {
+  if (externalHandoff || state.submissionFailed) {
+    lovrSetError("Graphics presentation is unavailable");
+    return false;
+  }
   mtx_lock(&state.lock);
 
   if (state.shouldPresent) {
@@ -2330,6 +2427,7 @@ uint32_t lovrGraphicsAlignFields(DataField* parent, DataLayout layout) {
 }
 
 Buffer* lovrBufferCreate(const BufferInfo* info, void** data) {
+  if (!checkGraphicsReentry()) return NULL;
   uint32_t size = info->size;
   if (size == 0 && info->format) size = info->format->stride * MAX(info->format->length, 1);
   lovrCheck(size > 0, "Buffer size can not be zero");
@@ -2482,6 +2580,7 @@ const BufferInfo* lovrBufferGetInfo(Buffer* buffer) {
 }
 
 void* lovrBufferSetData(Buffer* buffer, uint32_t offset, uint32_t extent) {
+  if (!checkGraphicsReentry()) return NULL;
   if (extent == ~0u) extent = buffer->info.size - offset;
   lovrCheck(offset + extent <= buffer->info.size, "Attempt to write past the end of the Buffer");
 
@@ -2506,6 +2605,7 @@ void lovrBufferFlush(Buffer* buffer) {
 }
 
 bool lovrBufferCopy(Buffer* src, Buffer* dst, uint32_t srcOffset, uint32_t dstOffset, uint32_t extent) {
+  if (!checkGraphicsReentry()) return false;
   lovrCheck(srcOffset + extent <= src->info.size, "Buffer copy range goes past the end of the source Buffer");
   lovrCheck(dstOffset + extent <= dst->info.size, "Buffer copy range goes past the end of the destination Buffer");
   lovrCheck(src != dst || (srcOffset >= dstOffset + extent || dstOffset >= srcOffset + extent), "Copying part of a Buffer to itself requires non-overlapping copy regions");
@@ -2523,6 +2623,7 @@ bool lovrBufferCopy(Buffer* src, Buffer* dst, uint32_t srcOffset, uint32_t dstOf
 }
 
 bool lovrBufferClear(Buffer* buffer, uint32_t offset, uint32_t extent, uint32_t value) {
+  if (!checkGraphicsReentry()) return false;
   if (extent == 0) return true;
   if (extent == ~0u) extent = buffer->info.size - offset;
   lovrCheck(offset % 4 == 0, "Buffer clear offset must be a multiple of 4");
@@ -2542,6 +2643,7 @@ bool lovrBufferClear(Buffer* buffer, uint32_t offset, uint32_t extent, uint32_t 
 // Texture
 
 bool lovrGraphicsGetWindowTexture(Texture** texture) {
+  if (!checkGraphicsReentry()) return false;
   mtx_lock(&state.lock);
 
   if (!state.window && os_window_is_open()) {
@@ -2683,6 +2785,7 @@ static void lovrTextureUpload(void* arg) {
 }
 
 Texture* lovrTextureCreate(const TextureInfo* info) {
+  if (!checkGraphicsReentry()) return NULL;
   uint32_t limits[] = {
     [TEXTURE_2D] = state.limits.textureSize2D,
     [TEXTURE_3D] = state.limits.textureSize3D,
@@ -2901,6 +3004,7 @@ Texture* lovrTextureCreate(const TextureInfo* info) {
 }
 
 Texture* lovrTextureCreateView(Texture* parent, const TextureViewInfo* info) {
+  if (!checkGraphicsReentry()) return NULL;
   if (!checkTextureSession(parent)) return NULL;
   const TextureInfo* base = &parent->info;
   uint32_t maxLayers = base->type == TEXTURE_3D ? MAX(base->layers >> info->levelIndex, 1) : base->layers;
@@ -3051,6 +3155,11 @@ Texture* lovrTextureCreateView(Texture* parent, const TextureViewInfo* info) {
 
 void lovrTextureDestroy(void* ref) {
   Texture* texture = ref;
+  if (externalHandoff) {
+    texture->externalDestroyNext = externalDestroyTextures;
+    externalDestroyTextures = texture;
+    return;
+  }
   if (texture->sessionPrev) {
     *texture->sessionPrev = texture->sessionNext;
     if (texture->sessionNext) texture->sessionNext->sessionPrev = texture->sessionPrev;
@@ -4299,6 +4408,7 @@ const DataField* lovrShaderGetBufferFormat(Shader* shader, const char* name, uin
 // Material
 
 static bool lovrMaterialAllocate(Material* material) {
+  if (!checkGraphicsReentry()) return false;
   mtx_lock(&state.lock);
 
   MaterialBlock* block = NULL;
@@ -4471,6 +4581,11 @@ Material* lovrMaterialCreate(Texture* texture) {
 
 void lovrMaterialDestroy(void* ref) {
   Material* material = ref;
+  if (externalHandoff) {
+    material->externalDestroyNext = externalDestroyMaterials;
+    externalDestroyMaterials = material;
+    return;
+  }
   lovrMaterialRecycle(material);
   for (uint32_t i = 0; i < MAX_MATERIAL_TEXTURES; i++) {
     lovrRelease(material->textures[i], lovrTextureDestroy);
@@ -4825,6 +4940,7 @@ static void rasterizeGlyph(void* arg) {
 }
 
 static Glyph* lovrFontGetGlyph(Font* font, uint32_t codepoint, bool* resized) {
+  if (!checkGraphicsReentry()) return NULL;
   // TODO this could be improved a LOT (batch glyph lookups, readwrite lock, don't lock for as long, etc.)
   mtx_lock(&font->lock);
 
@@ -5572,6 +5688,7 @@ static bool lovrMeshFlush(Mesh* mesh) {
 }
 
 bool lovrMeshBuildRaytracer(Mesh* mesh) {
+  if (!checkGraphicsReentry()) return false;
   if (!lovrMeshFlush(mesh)) {
     return false;
   }
@@ -5867,6 +5984,7 @@ fail:
 }
 
 Model* lovrModelClone(Model* parent) {
+  if (!checkGraphicsReentry()) return NULL;
   Model* model = lovrCalloc(sizeof(Model));
   model->ref = 1;
   model->parent = parent;
@@ -6249,6 +6367,7 @@ bool lovrModelSetMaterial(Model* model, uint32_t index, Material* material) {
 }
 
 static bool lovrModelAnimateVertices(Model* model) {
+  if (!checkGraphicsReentry()) return false;
   ModelMetadata* meta = &model->meta;
 
   bool blend = !!model->blendShapeWeights;
@@ -6422,6 +6541,7 @@ static bool lovrModelAnimateVertices(Model* model) {
 }
 
 bool lovrModelBuildRaytracer(Model* model) {
+  if (!checkGraphicsReentry()) return false;
   ModelMetadata* meta = &model->meta;
 
   // Count the number of transforms required (number of nodes with meshes)
@@ -6699,6 +6819,7 @@ bool lovrRaytracerSet(Raytracer* raytracer, uint32_t id, float transform[16], ui
 }
 
 bool lovrRaytracerBuild(Raytracer* raytracer) {
+  if (!checkGraphicsReentry()) return false;
   mtx_lock(&state.lock);
 
   BufferView view = getBuffer(GPU_BUFFER_STREAM, raytracer->count * sizeof(gpu_tree_instance), 16);
@@ -6751,6 +6872,7 @@ static Readback* lovrReadbackCreate(ReadbackType type) {
 }
 
 Readback* lovrReadbackCreateBuffer(Buffer* buffer, uint32_t offset, uint32_t extent) {
+  if (!checkGraphicsReentry()) return NULL;
   if (extent == ~0u) extent = buffer->info.size - offset;
   lovrCheck(offset + extent <= buffer->info.size, "Tried to read past the end of the Buffer");
   lovrCheck(!buffer->info.format || offset % buffer->info.format->stride == 0, "Readback offset must be a multiple of Buffer's stride");
@@ -7036,14 +7158,37 @@ Pass* lovrPassCreate(const char* label) {
   return pass;
 }
 
-bool lovrGraphicsPrepareSessionTeardown(void) {
-  if (!gpu_prepare_teardown()) {
-    lovrSetError("Failed to complete headset session teardown: %s", gpu_get_error());
+bool lovrGraphicsQuiesceSessionResources(void) {
+  if (externalHandoff) {
+    lovrSetError("Graphics session quiescence is unavailable during external handoff");
     return false;
   }
-  lovrGraphicsInvalidateSessionResources();
+  if (state.lockReady) mtx_lock(&state.lock);
+  bool success = gpu_quiesce_locked();
+  if (state.lockReady) mtx_unlock(&state.lock);
+  if (!success) lovrSetError("Graphics session quiescence: %s", gpu_get_error());
+  return success;
+}
+
+bool lovrGraphicsDrainSessionResources(void) {
+  if (externalHandoff) {
+    lovrSetError("Graphics session drain is unavailable during external handoff");
+    return false;
+  }
+  if (state.lockReady) mtx_lock(&state.lock);
   gpu_flush_deferred_after_idle();
+  if (state.lockReady) mtx_unlock(&state.lock);
   return true;
+}
+
+bool lovrGraphicsPrepareSessionTeardown(void) {
+  if (externalHandoff) {
+    lovrSetError("Graphics session teardown is unavailable during external handoff");
+    return false;
+  }
+  if (!lovrGraphicsQuiesceSessionResources()) return false;
+  lovrGraphicsInvalidateSessionResources();
+  return lovrGraphicsDrainSessionResources();
 }
 
 void lovrGraphicsInvalidateSessionPass(Pass* pass) {
@@ -10008,6 +10153,7 @@ static void destroyBuffers(BufferAllocator* allocator) {
 
 // Must not hold lock
 static void pollReadbacks(void) {
+  if (!checkGraphicsReentry()) return;
   while (true) {
     mtx_lock(&state.lock);
     if (state.readbacks && lovrReadbackPoll(state.readbacks)) {
@@ -10565,4 +10711,13 @@ static void onResize(uint32_t width, uint32_t height) {
 
 static void onMessage(void* context, const char* message) {
   lovrLog(LOG_DEBUG, "GPU", message);
+}
+
+static bool lockQueue(void* context) {
+  if (externalHandoff) return false;
+  return !state.lockReady || mtx_lock(&state.lock) == thrd_success;
+}
+
+static void unlockQueue(void* context) {
+  if (state.lockReady) mtx_unlock(&state.lock);
 }

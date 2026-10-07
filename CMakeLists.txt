@@ -461,7 +461,38 @@ target_include_directories(lovr PRIVATE
 target_link_directories(lovr PRIVATE ${LOVR_LIB_DIRS})
 
 if(LOVR_ENABLE_OPENVR)
-  target_sources(lovr PRIVATE src/modules/headset/openvr_runtime.c)
+  target_sources(lovr PRIVATE
+    src/modules/headset/openvr_runtime.c
+    src/modules/headset/openvr_vulkan.c
+    src/modules/headset/openvr_overlay.c
+    src/modules/headset/openvr_input.c
+    src/modules/headset/openvr_assets.c
+    src/modules/headset/headset_openvr.c
+  )
+  target_link_libraries(lovr ${CMAKE_DL_LIBS})
+  target_compile_definitions(lovr PRIVATE LOVR_OPENVR_SHARED=$<BOOL:${LOVR_BUILD_SHARED}>)
+  set(openvr_assets
+    ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/actions.json
+    ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_vive_controller.json
+    ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_knuckles.json
+    ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_oculus_touch.json
+  )
+  if(LOVR_BUILD_SHARED)
+    set(openvr_asset_directory "${CMAKE_CURRENT_BINARY_DIR}/lovr-openvr")
+  else()
+    set(openvr_asset_directory "${CMAKE_BINARY_DIR}/bin/lovr-openvr")
+  endif()
+  if(CMAKE_CONFIGURATION_TYPES)
+    get_filename_component(openvr_asset_parent "${openvr_asset_directory}" DIRECTORY)
+    set(openvr_asset_directory "${openvr_asset_parent}/$<CONFIG>/lovr-openvr")
+  endif()
+  add_custom_target(lovr_openvr_assets
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${openvr_asset_directory}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${openvr_assets} "${openvr_asset_directory}"
+    DEPENDS ${openvr_assets}
+    VERBATIM
+  )
+  add_dependencies(lovr lovr_openvr_assets)
   target_link_options(lovr PRIVATE "LINKER:--exclude-libs,liblovr_openvr_loader.a")
 endif()
 

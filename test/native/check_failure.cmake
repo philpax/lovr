@@ -11,6 +11,9 @@ set(expected_names headset.dispatch.lifecycle headset.dispatch.features-and-laye
   headset.dispatch.creator-and-generation headset.dispatch.unchecked.creator-and-generation
   headset.harness headset.harness.discovery headset.harness.failure-propagation)
 if(GPU_TESTS_ENABLED)
+  list(APPEND expected_names headset.openxr.connect.no-overlay headset.openxr.connect.probe
+    headset.openxr.connect.cleanup-retry headset.openxr.connect.failures
+    headset.openxr.connect.bindings-retry headset.openxr.connect.discovery)
   if(NOT DEFINED JOINT_EXECUTABLE OR NOT DEFINED JOINT_CASES)
     message(FATAL_ERROR "JOINT_EXECUTABLE and JOINT_CASES are required")
   endif()
@@ -40,7 +43,8 @@ if(GPU_TESTS_ENABLED)
     message(FATAL_ERROR "layer discovery failed: status=${status}, stdout=${output}, stderr=${errors}")
   endif()
   list(APPEND expected_names headset.gpu.normal headset.gpu.partial headset.gpu.absent headset.gpu.init-failure
-    headset.gpu.runtime-retirement headset.gpu.wait-errors headset.gpu.mutex-failure headset.gpu.prepare-teardown)
+    headset.gpu.runtime-retirement headset.gpu.wait-errors headset.gpu.mutex-failure headset.gpu.prepare-teardown
+    headset.gpu.external.descriptor headset.gpu.external.rejection headset.gpu.external.ownership headset.gpu.external.transitions)
   if(NOT DEFINED CLEANUP_EXECUTABLE OR NOT DEFINED CLEANUP_CASES)
     message(FATAL_ERROR "CLEANUP_EXECUTABLE and CLEANUP_CASES are required")
   endif()
@@ -64,6 +68,11 @@ if(GPU_TESTS_ENABLED)
   foreach(case IN LISTS graphics_cases)
     list(APPEND expected_names headset.${case})
   endforeach()
+  list(APPEND expected_names headset.graphics.external.ordering headset.graphics.external.callback-failure
+    headset.graphics.external.invalid headset.graphics.external.failures
+    headset.graphics.external.callback-last-reference-release
+    headset.graphics.external.arbitrary-texture-api-reentry-rejected headset.graphics.external.selective-quiescence
+    headset.graphics.external.callback-material-last-reference-release)
   list(APPEND expected_names headset.graphics.session.discovery
     headset.graphics.session.lua-boundary.checked headset.graphics.session.lua-boundary.unchecked)
   list(JOIN graphics_cases "\n" graphics_expected_output)
@@ -84,7 +93,26 @@ if(OPENVR_ENABLED)
     headset.openvr.overlay-sdk-fntables headset.openvr.idempotent-lifecycle headset.openvr.exclusive-owner
     headset.openvr.init-failure-cleanup-retry headset.openvr.version-failure-cleanup
     headset.openvr.interface-failure-cleanup headset.openvr.sdk-failure-cleanup headset.openvr.incomplete-loader
-    headset.openvr.discovery headset.openvr.without-runtime)
+    headset.openvr.discovery headset.openvr.without-runtime
+    headset.openvr.vulkan.negotiation headset.openvr.vulkan.query-errors
+    headset.openvr.vulkan.empty-and-invalid headset.openvr.vulkan.allocation-errors
+    headset.openvr.vulkan.adapter-errors headset.openvr.vulkan.vulkan-errors headset.openvr.vulkan.discovery
+    headset.openvr.panel_property_matrix headset.openvr.panel_failure_cleanup_retry
+    headset.openvr.panel_capability_contract headset.openvr.panel_stereo_curve_mapping headset.openvr.panel.discovery
+    headset.openvr.input.initialization headset.openvr.input.action-snapshot-transitions
+    headset.openvr.input.haptic-action-routing headset.openvr.input.scalar-axis-canary
+    headset.openvr.input.malformed-tracking headset.openvr.input.discovery
+    headset.openvr.assets.installed_action_asset_resolution headset.openvr.assets.artifact_path_failures
+    headset.openvr.assets.asset_file_failures headset.openvr.assets.asset_directory_failures
+    headset.openvr.assets.relative_artifact_rejected_after_cwd_change headset.openvr.assets.asset_error_context
+    headset.openvr.assets.discovery
+    headset.openvr.backend.never-submitted-restart headset.openvr.backend.atomic-lists
+    headset.openvr.backend.cleanup-retries headset.openvr.backend.property-failure
+    headset.openvr.backend.unsupported-outputs headset.openvr.backend.stereo-immutable-transport
+    headset.openvr.backend.borrowed-config headset.openvr.backend.retained-graphics
+    headset.openvr.backend.discovery headset.openvr.backend.graphics-discovery
+    headset.openvr.assets.staged.shared headset.openvr.assets.staged.relative-rejected
+    headset.openvr.assets.staged.standalone)
 endif()
 execute_process(COMMAND "${CTEST_EXECUTABLE}" -N -L headset WORKING_DIRECTORY "${TEST_DIRECTORY}"
   RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE errors)

@@ -1,0 +1,17 @@
+#ifndef LOVR_HEADSET_OPENXR_H
+#define LOVR_HEADSET_OPENXR_H
+
+typedef enum {
+  OPENXR_CONNECT_ORDINARY,
+  OPENXR_CONNECT_REQUIRE_OVERLAY
+} OpenXRConnectMode;
+
+typedef enum {
+  OPENXR_CONNECT_SELECTED,
+  OPENXR_CONNECT_UNAVAILABLE_CLEANED,
+  OPENXR_CONNECT_CLEANUP_PENDING
+} OpenXRConnectResult;
+
+OpenXRConnectResult lovrOpenXRConnect(OpenXRConnectMode mode);
+
+#endif

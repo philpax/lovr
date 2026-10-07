@@ -54,13 +54,20 @@ struct gpu_texture {
   VkImageAspectFlagBits aspect;
   VkImageLayout layout;
   uint32_t layers;
-  uint8_t samples;
+  uint32_t samples;
   uint8_t baseLevel;
   uint8_t format;
   bool hostCopy;
   bool imported;
   bool foreign;
   bool srgb;
+  bool externalValid;
+  gpu_texture_type type;
+  VkFormat vkformat;
+  uint32_t width;
+  uint32_t height;
+  uint32_t mipmaps;
+  VkImageUsageFlags usage;
 };
 
 struct gpu_sampler {
@@ -666,6 +673,7 @@ gpu_address gpu_tree_get_address(gpu_tree* tree) {
 // Texture
 
 bool gpu_texture_init(gpu_texture* texture, gpu_texture_info* info) {
+  texture->externalValid = false;
   static const VkImageType imageTypes[] = {
     [GPU_TEXTURE_2D] = VK_IMAGE_TYPE_2D,
     [GPU_TEXTURE_3D] = VK_IMAGE_TYPE_3D,
@@ -768,6 +776,13 @@ bool gpu_texture_init(gpu_texture* texture, gpu_texture_info* info) {
     }
   }
 
+  texture->type = info->type;
+  texture->vkformat = imageInfo.format;
+  texture->width = imageInfo.extent.width;
+  texture->height = imageInfo.extent.height;
+  texture->mipmaps = imageInfo.mipLevels;
+  texture->usage = imageInfo.usage;
+
   VkFormat formats[2];
   VkImageFormatListCreateInfo imageFormatList;
   if (mutableFormat && state.extensions.formatList) {
@@ -821,10 +836,12 @@ bool gpu_texture_init(gpu_texture* texture, gpu_texture_info* info) {
     return false;
   }
 
+  texture->externalValid = true;
   return true;
 }
 
 bool gpu_texture_init_view(gpu_texture* texture, gpu_texture_view_info* info) {
+  texture->externalValid = false;
   if (texture != info->source) {
     uint32_t layers = info->layerCount ? info->layerCount : (info->source->layers - info->layerIndex);
     texture->handle = info->source->handle;
@@ -896,11 +913,66 @@ bool gpu_texture_init_view(gpu_texture* texture, gpu_texture_view_info* info) {
 }
 
 void gpu_texture_destroy(gpu_texture* texture) {
+  texture->externalValid = false;
   condemn(texture->view, VK_OBJECT_TYPE_IMAGE_VIEW);
   if (texture->imported) return;
   if (!texture->memory) return;
   condemn(texture->handle, VK_OBJECT_TYPE_IMAGE);
   release(texture->memory, texture->offset);
+}
+
+bool gpu_texture_get_external_image(gpu_texture* texture, gpu_external_image* image) {
+  VkImageUsageFlags required = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  if (!texture || !image || !texture->externalValid || !texture->handle || !texture->view ||
+      !texture->memory || texture->imported || texture->foreign || texture->type != GPU_TEXTURE_2D ||
+      texture->layers != 1 || texture->baseLevel != 0 || texture->samples > 1 ||
+      texture->aspect != VK_IMAGE_ASPECT_COLOR_BIT || (texture->usage & required) != required ||
+      !texture->width || !texture->height || !texture->mipmaps || texture->vkformat == VK_FORMAT_UNDEFINED ||
+      texture->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+      !state.instance || !state.adapter || !state.device || !state.queue || state.teardownPrepared) {
+    return false;
+  }
+
+  *image = (gpu_external_image) {
+    .instance = (uintptr_t) state.instance,
+    .physicalDevice = (uintptr_t) state.adapter,
+    .device = (uintptr_t) state.device,
+    .queue = (uintptr_t) state.queue,
+    .image = (uint64_t) texture->handle,
+    .queueFamily = state.queueFamilyIndex,
+    .queueIndex = 0,
+    .width = texture->width,
+    .height = texture->height,
+    .format = texture->vkformat,
+    .samples = texture->samples ? texture->samples : 1
+  };
+  return true;
+}
+
+bool gpu_texture_external_barrier(gpu_stream* stream, gpu_texture* texture, bool begin) {
+  gpu_external_image image;
+  if (!stream || !stream->commands || !gpu_texture_get_external_image(texture, &image)) return false;
+
+  vkCmdPipelineBarrier2KHR(stream->commands, &(VkDependencyInfoKHR) {
+    .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO_KHR,
+    .imageMemoryBarrierCount = 1,
+    .pImageMemoryBarriers = &(VkImageMemoryBarrier2KHR) {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2_KHR,
+      .srcStageMask = begin ? VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR : VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT_KHR,
+      .dstStageMask = begin ? VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT_KHR : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR,
+      .srcAccessMask = begin ? VK_ACCESS_2_MEMORY_READ_BIT_KHR | VK_ACCESS_2_MEMORY_WRITE_BIT_KHR : VK_ACCESS_2_TRANSFER_READ_BIT_KHR,
+      .dstAccessMask = begin ? VK_ACCESS_2_TRANSFER_READ_BIT_KHR : VK_ACCESS_2_MEMORY_READ_BIT_KHR | VK_ACCESS_2_MEMORY_WRITE_BIT_KHR,
+      .oldLayout = begin ? texture->layout : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+      .newLayout = begin ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : texture->layout,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = texture->handle,
+      .subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+      .subresourceRange.levelCount = texture->mipmaps,
+      .subresourceRange.layerCount = 1
+    }
+  });
+  return true;
 }
 
 bool gpu_texture_upload(gpu_texture* texture, gpu_upload_info* info) {
@@ -3147,6 +3219,11 @@ bool gpu_init(gpu_config* config) {
       config->vk.getPhysicalDevice(state.instance, (uintptr_t) &state.adapter);
     }
 
+    if (config->vk.requirePhysicalDevice && (!config->vk.getPhysicalDevice || !state.adapter)) {
+      error("Required physical device unavailable");
+      goto fail;
+    }
+
     if (!state.adapter) {
       uint32_t deviceCount = 0;
       VK(vkEnumeratePhysicalDevices(state.instance, &deviceCount, NULL), "vkEnumeratePhysicalDevices") goto fail;
@@ -3859,8 +3936,13 @@ bool gpu_get_memory_info(uint64_t* budget, uint64_t* usage) {
 }
 
 bool gpu_submit(gpu_stream** streams, uint32_t count, uint32_t tick) {
-  gpu_upload* upload = atomic_exchange(&state.uploads, NULL);
-  gpu_stream* stream = upload ? gpu_stream_begin("Texture Uploads") : NULL;
+  gpu_upload* upload = NULL;
+  gpu_stream* stream = NULL;
+  if (atomic_load(&state.uploads)) {
+    stream = gpu_stream_begin("Texture Uploads");
+    if (!stream) return false;
+    upload = atomic_exchange(&state.uploads, NULL);
+  }
 
   while (upload) {
     VkImageSubresourceRange subresource = {
@@ -4027,13 +4109,26 @@ bool gpu_wait_idle(void) {
   return true;
 }
 
+bool gpu_quiesce_locked(void) {
+  if (!state.device || state.teardownPrepared) return true;
+  VkResult result = vkDeviceWaitIdle(state.device);
+  if (result == VK_SUCCESS || result == VK_ERROR_DEVICE_LOST) return true;
+  vkerror(result, "vkDeviceWaitIdle");
+  return false;
+}
+
 bool gpu_prepare_teardown(void) {
   if (state.teardownPrepared) {
     gpu_flush_deferred_after_idle();
     return true;
   }
   if (state.device) {
+    if (state.config.fnQueueLock && !state.config.fnQueueLock(state.config.userdata)) {
+      error("Queue unavailable during teardown");
+      return false;
+    }
     VkResult result = vkDeviceWaitIdle(state.device);
+    if (state.config.fnQueueUnlock) state.config.fnQueueUnlock(state.config.userdata);
     if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) {
       vkerror(result, "vkDeviceWaitIdle");
       return false;
@@ -4045,7 +4140,12 @@ bool gpu_prepare_teardown(void) {
 
 bool gpu_begin_teardown(void) {
   if (!state.teardownPrepared && state.device) {
+    if (state.config.fnQueueLock && !state.config.fnQueueLock(state.config.userdata)) {
+      error("Queue unavailable during teardown");
+      return false;
+    }
     VkResult result = vkDeviceWaitIdle(state.device);
+    if (state.config.fnQueueUnlock) state.config.fnQueueUnlock(state.config.userdata);
     if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) {
       vkerror(result, "vkDeviceWaitIdle");
       return false;

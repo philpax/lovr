@@ -6,6 +6,7 @@
 #include "util.h"
 
 static atomic_uint ref;
+static _Thread_local bool externalHandoff;
 typedef struct MaterialBlock {
   struct MaterialBlock* next;
   gpu_bundle_pool* bundlePool;

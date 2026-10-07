@@ -49,6 +49,7 @@ bool gpu_wait_idle(void) {
 }
 void gpu_flush_deferred(void) { deferredDestroys = 0; drainCalls++; }
 bool gpu_prepare_teardown(void) { return !prepareFails; }
+bool gpu_quiesce_locked(void) { return !prepareFails; }
 void gpu_flush_deferred_after_idle(void) { deferredDestroys = 0; drainCalls++; }
 #endif
 size_t gpu_sizeof_buffer(void) { return sizeof(gpu_buffer); }

@@ -1,0 +1,204 @@
+{
+  "action_sets": [
+    {
+      "name": "/actions/lovr",
+      "usage": "leftright"
+    }
+  ],
+  "actions": [
+    {
+      "name": "/actions/lovr/in/grip_pose",
+      "type": "pose",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/aim_pose",
+      "type": "pose",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/trigger",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/thumbstick",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/touchpad",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/grip",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/menu",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/a",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/b",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/x",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/y",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/thumbrest",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/thumbtap",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/trigger_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/thumbstick_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/touchpad_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/grip_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/menu_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/a_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/b_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/x_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/y_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/thumbrest_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/thumbtap_touch",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/trigger_axis",
+      "type": "vector1",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/thumbstick_axis",
+      "type": "vector2",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/touchpad_axis",
+      "type": "vector2",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/in/grip_axis",
+      "type": "vector1",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/lovr/out/haptic",
+      "type": "vibration",
+      "requirement": "optional"
+    }
+  ],
+  "default_bindings": [
+    {
+      "controller_type": "vive_controller",
+      "binding_url": "bindings_vive_controller.json"
+    },
+    {
+      "controller_type": "knuckles",
+      "binding_url": "bindings_knuckles.json"
+    },
+    {
+      "controller_type": "oculus_touch",
+      "binding_url": "bindings_oculus_touch.json"
+    }
+  ],
+  "localization": [
+    {
+      "language_tag": "en_US",
+      "/actions/lovr": "LÖVR input",
+      "/actions/lovr/in/grip_pose": "Grip pose",
+      "/actions/lovr/in/aim_pose": "Aim pose",
+      "/actions/lovr/in/trigger": "Trigger",
+      "/actions/lovr/in/thumbstick": "Thumbstick",
+      "/actions/lovr/in/touchpad": "Touchpad",
+      "/actions/lovr/in/grip": "Grip",
+      "/actions/lovr/in/menu": "Menu",
+      "/actions/lovr/in/a": "A",
+      "/actions/lovr/in/b": "B",
+      "/actions/lovr/in/x": "X",
+      "/actions/lovr/in/y": "Y",
+      "/actions/lovr/in/thumbrest": "Thumbrest",
+      "/actions/lovr/in/thumbtap": "Thumbtap",
+      "/actions/lovr/in/trigger_touch": "Trigger touch",
+      "/actions/lovr/in/thumbstick_touch": "Thumbstick touch",
+      "/actions/lovr/in/touchpad_touch": "Touchpad touch",
+      "/actions/lovr/in/grip_touch": "Grip touch",
+      "/actions/lovr/in/menu_touch": "Menu touch",
+      "/actions/lovr/in/a_touch": "A touch",
+      "/actions/lovr/in/b_touch": "B touch",
+      "/actions/lovr/in/x_touch": "X touch",
+      "/actions/lovr/in/y_touch": "Y touch",
+      "/actions/lovr/in/thumbrest_touch": "Thumbrest touch",
+      "/actions/lovr/in/thumbtap_touch": "Thumbtap touch",
+      "/actions/lovr/in/trigger_axis": "Trigger axis",
+      "/actions/lovr/in/thumbstick_axis": "Thumbstick axis",
+      "/actions/lovr/in/touchpad_axis": "Touchpad axis",
+      "/actions/lovr/in/grip_axis": "Grip axis",
+      "/actions/lovr/out/haptic": "Haptic"
+    }
+  ]
+}

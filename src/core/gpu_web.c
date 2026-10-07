@@ -303,6 +303,14 @@ void gpu_texture_destroy(gpu_texture* texture) {
   wgpu_object_destroy(texture->handle);
 }
 
+bool gpu_texture_get_external_image(gpu_texture* texture, gpu_external_image* image) {
+  return false;
+}
+
+bool gpu_texture_external_barrier(gpu_stream* stream, gpu_texture* texture, bool begin) {
+  return false;
+}
+
 bool gpu_texture_upload(gpu_texture* texture, gpu_upload_info* info) {
   uint32_t layers = info->extent[2];
   uint32_t levels = info->extent[3];
@@ -1739,6 +1747,10 @@ bool gpu_wait_tick(uint32_t tick) {
 
 bool gpu_wait_idle(void) {
   return true; // TODO unsupported?
+}
+
+bool gpu_quiesce_locked(void) {
+  return gpu_wait_idle();
 }
 
 bool gpu_prepare_teardown(void) {

@@ -282,6 +282,22 @@ typedef struct {
   const char* label;
 } gpu_texture_info;
 
+typedef struct {
+  uintptr_t instance;
+  uintptr_t physicalDevice;
+  uintptr_t device;
+  uintptr_t queue;
+  uint64_t image;
+  uint32_t queueFamily;
+  uint32_t queueIndex;
+  uint32_t width;
+  uint32_t height;
+  uint32_t format;
+  uint32_t samples;
+} gpu_external_image;
+
+bool gpu_texture_get_external_image(gpu_texture* texture, gpu_external_image* image);
+bool gpu_texture_external_barrier(gpu_stream* stream, gpu_texture* texture, bool begin);
 bool gpu_texture_init(gpu_texture* texture, gpu_texture_info* info);
 bool gpu_texture_init_view(gpu_texture* texture, gpu_texture_view_info* info);
 void gpu_texture_destroy(gpu_texture* texture);
@@ -885,6 +901,8 @@ typedef struct {
   void (*fnLog)(void* userdata, const char* message);
   void* (*fnAlloc)(size_t size);
   void (*fnFree)(void* data);
+  bool (*fnQueueLock)(void* userdata);
+  void (*fnQueueUnlock)(void* userdata);
   const char* engineName;
   uint32_t engineVersion[3];
   gpu_device_info* device;
@@ -893,6 +911,7 @@ typedef struct {
   struct {
     uint32_t (*createInstance)(void* instanceCreateInfo, void* allocator, uintptr_t instance, void* getInstanceProcAddr);
     void (*getPhysicalDevice)(void* instance, uintptr_t physicalDevice);
+    bool requirePhysicalDevice;
     uint32_t (*createDevice)(void* instance, void* devceCreateInfo, void* allocator, uintptr_t device, void* getInstanceProcAddr);
     bool (*beforeDestroy)(void);
     void* cacheData;
@@ -908,6 +927,7 @@ bool gpu_submit(gpu_stream** streams, uint32_t count, uint32_t tick);
 bool gpu_is_complete(uint32_t tick);
 bool gpu_wait_tick(uint32_t tick);
 bool gpu_wait_idle(void);
+bool gpu_quiesce_locked(void);
 bool gpu_prepare_teardown(void);
 bool gpu_begin_teardown(void);
 void gpu_flush_deferred_after_idle(void);

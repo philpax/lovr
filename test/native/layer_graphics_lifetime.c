@@ -76,6 +76,7 @@ bool gpu_prepare_teardown(void) {
 }
 void gpu_flush_deferred_after_idle(void) { if (!prepared) abort(); deferredDestroys = 0; drainCalls++; }
 void gpu_flush_deferred(void) { deferredDestroys = 0; drainCalls++; }
+bool gpu_quiesce_locked(void) { return gpu_prepare_teardown(); }
 bool gpu_wait_idle(void) { if (!gpu_prepare_teardown()) return false; gpu_flush_deferred_after_idle(); return true; }
 
 static XrResult XRAPI_CALL jointCreateSwapchain(XrSession session, const XrSwapchainCreateInfo* info, XrSwapchain* handle) {

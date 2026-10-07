@@ -1,0 +1,215 @@
+{
+  "controller_type": "oculus_touch",
+  "name": "L\u00d6VR oculus_touch provisional bindings",
+  "description": "Touch grip poses are unsupported and deliberately unbound until controller transforms are verified against LÖVR grip semantics. Tip aim paths exist in the official profile; visual and runtime behavior remain unverified. Unavailable actions remain unsupported.",
+  "bindings": {
+    "/actions/lovr": {
+      "poses": [
+        {
+          "output": "/actions/lovr/in/aim_pose",
+          "path": "/user/hand/left/pose/tip"
+        },
+        {
+          "output": "/actions/lovr/in/aim_pose",
+          "path": "/user/hand/right/pose/tip"
+        }
+      ],
+      "haptics": [
+        {
+          "output": "/actions/lovr/out/haptic",
+          "path": "/user/hand/left/output/haptic"
+        },
+        {
+          "output": "/actions/lovr/out/haptic",
+          "path": "/user/hand/right/output/haptic"
+        }
+      ],
+      "sources": [
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/lovr/in/trigger_axis"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/trigger"
+            }
+          },
+          "parameters": {
+            "click_activate_threshold": "0.75",
+            "click_deactivate_threshold": "0.7"
+          }
+        },
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "touch": {
+              "output": "/actions/lovr/in/trigger_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/joystick",
+          "mode": "joystick",
+          "inputs": {
+            "position": {
+              "output": "/actions/lovr/in/thumbstick_axis"
+            },
+            "click": {
+              "output": "/actions/lovr/in/thumbstick"
+            },
+            "touch": {
+              "output": "/actions/lovr/in/thumbstick_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/grip",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/lovr/in/grip_axis"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/grip",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/grip"
+            }
+          },
+          "parameters": {
+            "click_activate_threshold": "0.8",
+            "click_deactivate_threshold": "0.7"
+          }
+        },
+        {
+          "path": "/user/hand/left/input/x",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/x"
+            },
+            "touch": {
+              "output": "/actions/lovr/in/x_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/y",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/y"
+            },
+            "touch": {
+              "output": "/actions/lovr/in/y_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/lovr/in/trigger_axis"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/trigger"
+            }
+          },
+          "parameters": {
+            "click_activate_threshold": "0.75",
+            "click_deactivate_threshold": "0.7"
+          }
+        },
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "button",
+          "inputs": {
+            "touch": {
+              "output": "/actions/lovr/in/trigger_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/joystick",
+          "mode": "joystick",
+          "inputs": {
+            "position": {
+              "output": "/actions/lovr/in/thumbstick_axis"
+            },
+            "click": {
+              "output": "/actions/lovr/in/thumbstick"
+            },
+            "touch": {
+              "output": "/actions/lovr/in/thumbstick_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/grip",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/lovr/in/grip_axis"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/grip",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/grip"
+            }
+          },
+          "parameters": {
+            "click_activate_threshold": "0.8",
+            "click_deactivate_threshold": "0.7"
+          }
+        },
+        {
+          "path": "/user/hand/right/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/a"
+            },
+            "touch": {
+              "output": "/actions/lovr/in/a_touch"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/b",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/lovr/in/b"
+            },
+            "touch": {
+              "output": "/actions/lovr/in/b_touch"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

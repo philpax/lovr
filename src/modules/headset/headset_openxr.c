@@ -1,4 +1,5 @@
 #include "headset/headset_ops.h"
+#include "headset/headset_openxr.h"
 #include "headset/headset_layer.h"
 #include "actions.h"
 #include "data/blob.h"
@@ -226,6 +227,9 @@ static atomic_uint ref;
 static struct {
   HeadsetConfig config;
   Simulator simulator;
+  bool connected;
+  bool cleanupPending;
+  char connectionError[1024];
   XrInstance instance;
   XrSystemId system;
   XrInstanceProperties instanceProperties;
@@ -361,7 +365,8 @@ static bool lovrSwapchainDestroyPrepared(Swapchain* swapchain);
 static Texture* lovrSwapchainAcquire(Swapchain* swapchain);
 static bool lovrSwapchainRelease(Swapchain* swapchain);
 
-static void disconnect(void);
+static bool disconnect(void);
+static OpenXRConnectResult cleanupConnection(void);
 static bool openxrDisconnect(void);
 static void xrthrow(XrResult result, const char* symbol);
 static XrBool32 onMessage(XrDebugUtilsMessageSeverityFlagsEXT severity, XrDebugUtilsMessageTypeFlagsEXT type, const XrDebugUtilsMessengerCallbackDataEXT* data, void* userdata);
@@ -505,10 +510,22 @@ static void openxrHeadsetDestroy(void) {
 }
 
 static bool openxrHeadsetConnect(void) {
-  if (state.system) {
-    return true;
+  return lovrOpenXRConnect(OPENXR_CONNECT_ORDINARY) == OPENXR_CONNECT_SELECTED;
+}
+
+OpenXRConnectResult lovrOpenXRConnect(OpenXRConnectMode mode) {
+  if (state.cleanupPending) {
+    if (cleanupConnection() == OPENXR_CONNECT_CLEANUP_PENDING) return OPENXR_CONNECT_CLEANUP_PENDING;
+  }
+  if (state.connected) {
+    if (mode == OPENXR_CONNECT_ORDINARY || state.extensions.overlay) return OPENXR_CONNECT_SELECTED;
+    lovrSetError("OpenXR runtime does not support an overlay connection");
+    strncpy(state.connectionError, lovrGetError(), sizeof(state.connectionError) - 1);
+    return cleanupConnection();
   }
 
+  XrExtensionProperties* extensionProperties = NULL;
+  const char** enabledExtensionNames = NULL;
   HeadsetConfig* config = &state.config;
 
   XrResult result;
@@ -518,7 +535,7 @@ static bool openxrHeadsetConnect(void) {
 #if defined(__ANDROID__)
   static PFN_xrInitializeLoaderKHR xrInitializeLoaderKHR;
   XR_LOAD(xrInitializeLoaderKHR);
-  lovrAssert(xrInitializeLoaderKHR, "Failed to initialize loader");
+  lovrAssertGoto(fail, xrInitializeLoaderKHR, "Failed to initialize loader");
 
   XrLoaderInitInfoAndroidKHR loaderInfo = {
     .type = XR_TYPE_LOADER_INIT_INFO_ANDROID_KHR,
@@ -527,7 +544,8 @@ static bool openxrHeadsetConnect(void) {
   };
 
   if (XR_FAILED(xrInitializeLoaderKHR((XrLoaderInitInfoBaseHeaderKHR*) &loaderInfo))) {
-    return true;
+    lovrSetError("OpenXR loader initialization failed");
+    goto fail;
   }
 #elif defined(__linux__) || defined(__APPLE__)
   if (!config->debug) {
@@ -542,11 +560,15 @@ static bool openxrHeadsetConnect(void) {
   // Extensions
 
   uint32_t extensionCount = 0;
-  XR(xrEnumerateInstanceExtensionProperties(NULL, 0, &extensionCount, NULL), "xrEnumerateInstanceExtensionProperties");
+  XRG(xrEnumerateInstanceExtensionProperties(NULL, 0, &extensionCount, NULL), "xrEnumerateInstanceExtensionProperties", fail);
 
-  XrExtensionProperties* extensionProperties = lovrCalloc(extensionCount * sizeof(*extensionProperties));
+  extensionProperties = lovrCalloc(extensionCount * sizeof(*extensionProperties));
   for (uint32_t i = 0; i < extensionCount; i++) extensionProperties[i].type = XR_TYPE_EXTENSION_PROPERTIES;
-  xrEnumerateInstanceExtensionProperties(NULL, extensionCount, &extensionCount, extensionProperties);
+  XRG(xrEnumerateInstanceExtensionProperties(NULL, extensionCount, &extensionCount, extensionProperties), "xrEnumerateInstanceExtensionProperties", fail);
+  if (mode == OPENXR_CONNECT_REQUIRE_OVERLAY && !hasExtension(extensionProperties, extensionCount, "XR_EXTX_overlay")) {
+    lovrSetError("OpenXR runtime does not support XR_EXTX_overlay");
+    goto fail;
+  }
 
   if (config->debug) {
     lovrLog(LOG_DEBUG, "XR", "Supported OpenXR extensions:", extensionCount);
@@ -621,12 +643,12 @@ static bool openxrHeadsetConnect(void) {
     { "XR_ULTRALEAP_hand_tracking_forearm", &state.extensions.handTrackingElbow, true },
     { "XR_VALVE_frame_controller_interaction", &state.extensions.frameController, true },
     { "XR_VARJO_quad_views", &state.extensions.foveatedInset, true },
-    { "XR_EXTX_overlay", &state.extensions.overlay, config->overlay },
+    { "XR_EXTX_overlay", &state.extensions.overlay, config->overlay || mode == OPENXR_CONNECT_REQUIRE_OVERLAY },
     { "XR_HTCX_vive_tracker_interaction", &state.extensions.viveTrackers, true }
   };
 
   uint32_t enabledExtensionCount = 0;
-  const char** enabledExtensionNames = lovrMalloc((COUNTOF(extensions) + state.config.extensionCount) * sizeof(char*));
+  enabledExtensionNames = lovrMalloc((COUNTOF(extensions) + state.config.extensionCount) * sizeof(char*));
 
   for (uint32_t i = 0; i < COUNTOF(extensions); i++) {
     if (!extensions[i].enable) continue;
@@ -646,6 +668,7 @@ static bool openxrHeadsetConnect(void) {
   }
 
   lovrFree(extensionProperties);
+  extensionProperties = NULL;
 
   // Instance
 
@@ -672,8 +695,9 @@ static bool openxrHeadsetConnect(void) {
     .enabledExtensionNames = enabledExtensionNames
   };
 
-  XR(xrCreateInstance(&instanceInfo, &state.instance), "xrCreateInstance");
+  XRG(xrCreateInstance(&instanceInfo, &state.instance), "xrCreateInstance", fail);
   lovrFree(enabledExtensionNames);
+  enabledExtensionNames = NULL;
 
   XR_FOREACH(XR_LOAD)
   XR_FOREACH_PLATFORM(XR_LOAD)
@@ -694,11 +718,11 @@ static bool openxrHeadsetConnect(void) {
       .userCallback = onMessage
     };
 
-    xrCreateDebugUtilsMessengerEXT(state.instance, &messengerInfo, &state.messenger);
+    XRG(xrCreateDebugUtilsMessengerEXT(state.instance, &messengerInfo, &state.messenger), "xrCreateDebugUtilsMessengerEXT", fail);
   }
 
   state.instanceProperties.type = XR_TYPE_INSTANCE_PROPERTIES;
-  xrGetInstanceProperties(state.instance, &state.instanceProperties);
+  XRG(xrGetInstanceProperties(state.instance, &state.instanceProperties), "xrGetInstanceProperties", fail);
 
   // System
 
@@ -754,7 +778,9 @@ static bool openxrHeadsetConnect(void) {
     state.systemProperties.next = &passthroughProperties;
   }
 
-  XRG(xrGetSystemProperties(state.instance, state.system, &state.systemProperties), "xrGetSystemProperties", fail);
+  result = xrGetSystemProperties(state.instance, state.system, &state.systemProperties);
+  state.systemProperties.next = NULL;
+  XRG(result, "xrGetSystemProperties", fail);
   state.extensions.gaze = eyeGazeProperties.supportsEyeGazeInteraction;
   state.extensions.handTracking = handTrackingProperties.supportsHandTracking;
   state.extensions.bodyTracking = bodyTrackingProperties.supportsBodyTracking;
@@ -792,8 +818,10 @@ static bool openxrHeadsetConnect(void) {
   // Blend Modes
 
   XRG(xrEnumerateEnvironmentBlendModes(state.instance, state.system, state.viewConfiguration, 0, &state.blendModeCount, NULL), "xrEnumerateEnvironmentBlendModes", fail);
+  lovrAssertGoto(fail, state.blendModeCount > 0, "No environment blend modes available");
   state.blendModes = lovrMalloc(state.blendModeCount * sizeof(XrEnvironmentBlendMode));
   XRG(xrEnumerateEnvironmentBlendModes(state.instance, state.system, state.viewConfiguration, state.blendModeCount, &state.blendModeCount, state.blendModes), "xrEnumerateEnvironmentBlendModes", fail);
+  lovrAssertGoto(fail, state.blendModeCount > 0, "No environment blend modes available");
   state.blendMode = state.blendModes[0];
 
   // Actions
@@ -988,54 +1016,27 @@ static bool openxrHeadsetConnect(void) {
 
   // Remove bindings for unsupported extensions
 
-  #define REMOVE_BINDINGS(bindings, length, index, count)\
-    if (index < length - count) memmove(&bindings[index], &bindings[index + count], (length - index - count) * sizeof(Binding));
-
-  if (!state.extensions.handInteraction) {
-    for (uint32_t i = 0; i < MAX_PROFILES; i++) {
-      for (uint32_t j = 0; j < bindingCount[i]; j++) {
-        if (lovrActionBindings[i][j].action == ACTION_PINCH_POSE || lovrActionBindings[i][j].action == ACTION_POKE_POSE) {
-          REMOVE_BINDINGS(lovrActionBindings[i], bindingCount[i], j, 2);
-          bindingCount[i] -= 2;
-          i--;
-          break;
-        }
-      }
-    }
-  }
-
-  if (!state.extensions.palmPose) {
-    for (uint32_t i = 0; i < MAX_PROFILES; i++) {
-      for (uint32_t j = 0; j < bindingCount[i]; j++) {
-        if (lovrActionBindings[i][j].action == ACTION_PALM_POSE) {
-          REMOVE_BINDINGS(lovrActionBindings[i], bindingCount[i], j, 2);
-          bindingCount[i] -= 2;
-          break;
-        }
-      }
-    }
-  }
-
-  if (!state.extensions.microgestures) {
-    for (uint32_t i = 0; i < bindingCount[PROFILE_HAND]; i++) {
-      if (lovrActionBindings[PROFILE_HAND][i].action == ACTION_DPAD_UP_DOWN) {
-        REMOVE_BINDINGS(lovrActionBindings[PROFILE_HAND], bindingCount[PROFILE_HAND], i, 10);
-        bindingCount[PROFILE_HAND] -= 10;
-        break;
-      }
-    }
-  }
-
   XrPath path;
   XrActionSuggestedBinding suggestedBindings[64];
   for (uint32_t i = 0; i < MAX_PROFILES; i++) {
     if (bindingCount[i] == 0) continue;
 
+    uint32_t count = 0;
     for (uint32_t j = 0; j < bindingCount[i]; j++) {
-      XRG(xrStringToPath(state.instance, lovrActionBindings[i][j].path, &path), "xrStringToPath", fail);
-      suggestedBindings[j].action = state.actions[lovrActionBindings[i][j].action];
-      suggestedBindings[j].binding = path;
+      Binding binding = lovrActionBindings[i][j];
+      if (!state.extensions.handInteraction && (binding.action == ACTION_PINCH_POSE || binding.action == ACTION_POKE_POSE)) continue;
+      if (!state.extensions.palmPose && binding.action == ACTION_PALM_POSE) continue;
+      if (!state.extensions.microgestures && i == PROFILE_HAND &&
+          (binding.action == ACTION_DPAD_UP_DOWN || binding.action == ACTION_DPAD_DOWN_DOWN ||
+           binding.action == ACTION_DPAD_LEFT_DOWN || binding.action == ACTION_DPAD_RIGHT_DOWN ||
+           binding.action == ACTION_THUMBTAP_DOWN)) continue;
+      lovrAssertGoto(fail, count < COUNTOF(suggestedBindings), "Too many action bindings");
+      XRG(xrStringToPath(state.instance, binding.path, &path), "xrStringToPath", fail);
+      suggestedBindings[count].action = state.actions[binding.action];
+      suggestedBindings[count++].binding = path;
     }
+    if (!count) continue;
+    bindingCount[i] = count;
 
     XRG(xrStringToPath(state.instance, lovrInteractionProfilePaths[i], &path), "xrStringToPath", fail);
 
@@ -1052,14 +1053,18 @@ static bool openxrHeadsetConnect(void) {
   }
 
   state.frameState.type = XR_TYPE_FRAME_STATE;
-  return true;
+  state.connected = true;
+  return OPENXR_CONNECT_SELECTED;
 fail:
-  disconnect();
-  return false;
+  lovrFree(extensionProperties);
+  lovrFree(enabledExtensionNames);
+  state.systemProperties.next = NULL;
+  strncpy(state.connectionError, lovrGetError(), sizeof(state.connectionError) - 1);
+  return cleanupConnection();
 }
 
 static bool openxrHeadsetIsConnected(void) {
-  return state.system;
+  return state.connected && !state.cleanupPending;
 }
 
 static const char* openxrHeadsetGetName(void) {
@@ -4006,11 +4011,29 @@ static bool lovrSwapchainRelease(Swapchain* swapchain) {
   return true;
 }
 
-static void disconnect(void) {
-  openxrDisconnect();
+static OpenXRConnectResult cleanupConnection(void) {
+  char connectionError[sizeof(state.connectionError)];
+  memcpy(connectionError, state.connectionError, sizeof(connectionError));
+  if (disconnect()) {
+    if (connectionError[0]) lovrSetError("%s", connectionError);
+    return OPENXR_CONNECT_UNAVAILABLE_CLEANED;
+  }
+  if (connectionError[0]) {
+    char cleanupError[1024];
+    strncpy(cleanupError, lovrGetError(), sizeof(cleanupError) - 1);
+    cleanupError[sizeof(cleanupError) - 1] = '\0';
+    lovrSetError("OpenXR connection: %s; cleanup pending: %s", connectionError, cleanupError);
+  }
+  return OPENXR_CONNECT_CLEANUP_PENDING;
+}
+
+static bool disconnect(void) {
+  return openxrDisconnect();
 }
 
 static bool openxrDisconnect(void) {
+  state.connected = false;
+  state.cleanupPending = true;
   if (!openxrStopSession()) return false;
   if (state.actionSet) {
     XR(xrDestroyActionSet(state.actionSet), "xrDestroyActionSet");
@@ -4021,8 +4044,16 @@ static bool openxrDisconnect(void) {
     state.messenger = XR_NULL_HANDLE;
   }
   if (state.instance) XR(xrDestroyInstance(state.instance), "xrDestroyInstance");
-  state.system = XR_NULL_SYSTEM_ID;
-  state.instance = XR_NULL_HANDLE;
+  lovrFree(state.blendModes);
+  HeadsetConfig config = state.config;
+  Simulator simulator = state.simulator;
+  float clipNear = state.clipNear;
+  float clipFar = state.clipFar;
+  memset(&state, 0, sizeof(state));
+  state.config = config;
+  state.simulator = simulator;
+  state.clipNear = clipNear;
+  state.clipFar = clipFar;
   return true;
 }
 
