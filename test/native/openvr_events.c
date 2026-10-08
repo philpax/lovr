@@ -13,8 +13,6 @@ static struct {
   unsigned int overlayPolls;
   struct VREvent_t overlayEvent;
   bool overlayPending;
-  bool input;
-  bool pause;
   bool visible;
   bool dashboard;
   uint32_t renderer;
@@ -46,8 +44,9 @@ static bool OPENVR_FNTABLE_CALLTYPE pollOverlay(VROverlayHandle_t handle, struct
   return true;
 }
 
-static bool OPENVR_FNTABLE_CALLTYPE input(void) { return fake.input; }
-static bool OPENVR_FNTABLE_CALLTYPE pauseApplication(void) { return fake.pause; }
+// An overlay application sees the scene application's signals as no input and a pause request.
+static bool OPENVR_FNTABLE_CALLTYPE input(void) { return false; }
+static bool OPENVR_FNTABLE_CALLTYPE pauseApplication(void) { return true; }
 static bool OPENVR_FNTABLE_CALLTYPE visible(VROverlayHandle_t handle) { return handle == 19 && fake.visible; }
 static bool OPENVR_FNTABLE_CALLTYPE dashboard(void) { return fake.dashboard; }
 static uint32_t OPENVR_FNTABLE_CALLTYPE renderer(void) { return fake.renderer; }
@@ -99,7 +98,7 @@ static bool manifestReadyAndInitialState(void) {
   enqueue(EVREventType_VREvent_SeatedZeroPoseReset, 0);
   OpenVREventEffects effects = update(&state, false);
   CHECK(fake.polls == 0 && fake.overlayPolls == 0 && !state.sampled && effects.drained == 0);
-  fake.input = fake.visible = true;
+  fake.visible = true;
   fake.activity = EDeviceActivityLevel_k_EDeviceActivityLevel_UserInteraction;
   effects = update(&state, true);
   CHECK(effects.invalidateSeated && !effects.invalidateStanding && effects.drained == 1);
@@ -207,13 +206,16 @@ static bool quitFilterAndExit(void) {
 static bool focusActivityAndRestart(void) {
   OpenVREvents state;
   reset(&state);
-  fake.input = fake.visible = true;
+  fake.visible = true;
   update(&state, true);
-  fake.pause = true;
+  CHECK(state.inputFocus);
+  fake.dashboard = true;
   CHECK(update(&state, true).inputFocusChanged && !state.inputFocus && state.visible);
-  fake.pause = false;
-  fake.input = false;
   CHECK(!update(&state, true).inputFocusChanged && !state.inputFocus);
+  overlayTable.IsDashboardVisible = NULL;
+  fake.dashboard = false;
+  CHECK(!update(&state, true).inputFocusChanged && !state.inputFocus);
+  overlayTable.IsDashboardVisible = dashboard;
   const struct { EDeviceActivityLevel activity; bool known; bool active; } levels[] = {
     { EDeviceActivityLevel_k_EDeviceActivityLevel_Unknown, false, false },
     { EDeviceActivityLevel_k_EDeviceActivityLevel_Idle, true, false },
@@ -237,7 +239,6 @@ static bool focusActivityAndRestart(void) {
   enqueue(EVREventType_VREvent_ChaperoneRoomSetupCommitted, 0);
   effects = update(&state, true);
   CHECK(!effects.invalidateStanding && !effects.invalidateSeated);
-  fake.input = true;
   fake.activity = EDeviceActivityLevel_k_EDeviceActivityLevel_UserInteraction;
   update(&state, true);
   CHECK(state.inputFocus && state.active && state.visible);

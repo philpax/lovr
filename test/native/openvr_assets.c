@@ -60,7 +60,8 @@ static bool installedResolution(void) {
   OpenVRAssetsResult result = lovrOpenVRAssetsResolve(true, &provider);
   CHECK(result.status == OPENVR_ASSETS_OK_PATHS_NOT_PINNED && fake.shared);
   CHECK(!strcmp(result.manifest, "/prefix/lib/lovr-openvr/actions.json"));
-  CHECK(result.assetIndex == SIZE_MAX && fake.calls == 8);
+  // One inspection for each of /, /prefix, /prefix/lib, and /prefix/lib/lovr-openvr, then one per asset.
+  CHECK(result.assetIndex == SIZE_MAX && fake.calls == 4 + OPENVR_ASSET_COUNT);
   CHECK(lovrOpenVRAssetName(OPENVR_ASSET_COUNT) == NULL);
   reset();
   fake.source = "/proc/self/exe";

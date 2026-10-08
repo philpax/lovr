@@ -76,9 +76,11 @@ bool lovrHeadsetIsActive(void) { return false; }
 double lovrHeadsetGetDisplayTime(void) { return 0.; }
 
 static unsigned frameWaits, graphicsEvent, overlayPolls;
-static bool graphicsAvailable = true, graphicsPaused;
-static bool OPENVR_FNTABLE_CALLTYPE graphicsInputAvailable(void) { return graphicsAvailable; }
-static bool OPENVR_FNTABLE_CALLTYPE graphicsPause(void) { return graphicsPaused; }
+// The scene application's signals, as an overlay application always sees them.
+static bool graphicsDashboard;
+static bool OPENVR_FNTABLE_CALLTYPE graphicsInputAvailable(void) { return false; }
+static bool OPENVR_FNTABLE_CALLTYPE graphicsPause(void) { return true; }
+static bool OPENVR_FNTABLE_CALLTYPE graphicsDashboardVisible(void) { return graphicsDashboard; }
 static bool OPENVR_FNTABLE_CALLTYPE graphicsOverlayPoll(VROverlayHandle_t handle, struct VREvent_t* event, uint32_t size) {
   (void) event; (void) size;
   if (!handle) abort();
@@ -250,7 +252,8 @@ static struct VR_IVROverlay_FnTable runtimeAPI = {
   .SetOverlaySortOrder = runtimeOrder, .SetOverlayWidthInMeters = runtimeFloat, .SetOverlayTexelAspect = runtimeFloat,
   .SetOverlayCurvature = runtimeFloat, .SetOverlayTextureColorSpace = runtimeSpace, .SetOverlayTextureBounds = runtimeBounds,
   .SetOverlayTransformAbsolute = runtimeAbsolute, .SetOverlayTransformTrackedDeviceRelative = runtimeRelative,
-  .SetOverlayTransformProjection = runtimeProjection, .SetOverlayTexture = runtimeTexture, .WaitFrameSync = runtimeWait
+  .SetOverlayTransformProjection = runtimeProjection, .SetOverlayTexture = runtimeTexture, .WaitFrameSync = runtimeWait,
+  .IsDashboardVisible = graphicsDashboardVisible
 };
 
 static bool retainedGraphics(void) {
@@ -747,9 +750,8 @@ static bool inputTransitions(void) {
         analogReads == analogBefore + 2 * OPENVR_INPUT_AXIS_COUNT && poseReads == poseBefore + 4);
     }
   }
-  for (unsigned reason = 0; reason < 2; reason++) {
-    graphicsAvailable = reason != 0;
-    graphicsPaused = reason == 1;
+  {
+    graphicsDashboard = true;
     CHECK(vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
     unsigned before = actionUpdates, poseBefore = poseReads;
     uint64_t serial = vrState.inputSerial;
@@ -787,7 +789,7 @@ static bool inputTransitions(void) {
     graphicsEvent = EVREventType_VREvent_StandingZeroPoseReset;
     CHECK(pollEvents() && inputCleared() && !vrState.frame.snapshot.head.valid);
     CHECK(update() && pose(DEVICE_HAND_LEFT, p, q));
-    graphicsAvailable = true; graphicsPaused = false;
+    graphicsDashboard = false;
     CHECK(pollEvents() && focused());
     bool value, changed;
     CHECK(!down(DEVICE_HAND_LEFT, BUTTON_TRIGGER, &value, &changed));

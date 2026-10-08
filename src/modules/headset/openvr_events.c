@@ -89,8 +89,9 @@ void lovrOpenVREventsUpdate(OpenVREvents* state, const OpenVRRuntime* runtime, b
       if (handles[i]) visible |= overlay->IsOverlayVisible(handles[i]);
     }
   }
-  bool inputFocus = system && system->IsInputAvailable && system->ShouldApplicationPause &&
-    system->IsInputAvailable() && !system->ShouldApplicationPause();
+  // IsInputAvailable and ShouldApplicationPause describe the scene application; an overlay application
+  // sees no input and a pause request whenever it runs. The dashboard is what takes the controllers away.
+  bool inputFocus = overlay && overlay->IsDashboardVisible && !overlay->IsDashboardVisible();
   EDeviceActivityLevel activity = system && system->GetTrackedDeviceActivityLevel ?
     system->GetTrackedDeviceActivityLevel(k_unTrackedDeviceIndex_Hmd) : EDeviceActivityLevel_k_EDeviceActivityLevel_Unknown;
   bool active = activity == EDeviceActivityLevel_k_EDeviceActivityLevel_UserInteraction ||

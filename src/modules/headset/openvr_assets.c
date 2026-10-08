@@ -10,7 +10,8 @@
 
 static const char artifactAnchor = 0;
 static const char* assets[OPENVR_ASSET_COUNT] = {
-  "actions.json", "bindings_vive_controller.json", "bindings_knuckles.json", "bindings_oculus_touch.json"
+  "actions.json", "bindings_vive_controller.json", "bindings_knuckles.json", "bindings_oculus_touch.json",
+  "bindings_frame_controller.json"
 };
 
 const char* lovrOpenVRAssetName(size_t index) {

@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #define OPENVR_ASSET_PATH_CAPACITY 4096
-#define OPENVR_ASSET_COUNT 4
+#define OPENVR_ASSET_COUNT 5
 
 typedef enum {
   OPENVR_ASSETS_OK_PATHS_NOT_PINNED,

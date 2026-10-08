@@ -481,6 +481,7 @@ if(LOVR_ENABLE_OPENVR)
     ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_vive_controller.json
     ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_knuckles.json
     ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_oculus_touch.json
+    ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_frame_controller.json
   )
   set(openvr_asset_directory "$<TARGET_FILE_DIR:lovr>/lovr-openvr")
   add_custom_command(TARGET lovr POST_BUILD
