@@ -758,8 +758,8 @@ static bool viewAngles(uint32_t view, float* left, float* right, float* up, floa
   const float* tangents = state.frame.snapshot.eyes[view].tangents;
   *left = -atanf(tangents[0]);
   *right = atanf(tangents[1]);
-  *up = atanf(tangents[3]);
-  *down = -atanf(tangents[2]);
+  *up = -atanf(tangents[2]);
+  *down = atanf(tangents[3]);
   return true;
 }
 static void getClip(float* near, float* far) { *near = state.clipNear; *far = state.clipFar; }
@@ -918,8 +918,10 @@ static bool submitScene(void) {
   };
   for (unsigned eye = 0; eye < 2; eye++) {
     const OpenVRFrameEye* view = &state.scene.render.eyes[eye];
-    config.poses[eye] = view->transform;
-    config.frusta[eye] = (VROverlayProjection_t) { view->tangents[0], view->tangents[1], view->tangents[2], view->tangents[3] };
+    if (!lovrOpenVRProjectionEye(&view->transform, view->tangents, &config.views[eye], &config.frusta[eye])) {
+      lovrSetError("openvr: scene eye %u has an invalid pose or frustum", eye);
+      return false;
+    }
   }
   if (!projection->eyes[0] && !projection->eyes[1]) {
     char keys[2][96];

@@ -25,6 +25,27 @@ bool lovrOpenVRProjectionPanelOrder(uint32_t mainOrder, uint32_t panelIndex, uin
   return true;
 }
 
+// Converts an eye's pose (eye to tracking origin, rigid) and its GetProjectionRaw tangents into the
+// projection overlay's arguments. The overlay API differs from both inputs' conventions: it takes the
+// inverse transform, as its pmatTrackingOriginToOverlayTransform name says, and its frustum puts the
+// downward edge's tangent in fTop, where GetProjectionRaw's Y-down tangents put the upward edge. SteamVR's
+// own OpenXR runtime builds the arguments the same way, from a view matrix and tan(angleDown) in fTop.
+bool lovrOpenVRProjectionEye(const HmdMatrix34_t* pose, const float tangents[4], HmdMatrix34_t* view,
+    VROverlayProjection_t* frustum) {
+  if (!pose || !tangents || !view || !frustum) return false;
+  for (unsigned int row = 0; row < 3; row++) {
+    for (unsigned int column = 0; column < 4; column++) if (!isfinite(pose->m[row][column])) return false;
+  }
+  for (unsigned int i = 0; i < 4; i++) if (!isfinite(tangents[i])) return false;
+  if (tangents[0] >= tangents[1] || tangents[2] >= tangents[3]) return false;
+  for (unsigned int row = 0; row < 3; row++) {
+    for (unsigned int column = 0; column < 3; column++) view->m[row][column] = pose->m[column][row];
+    view->m[row][3] = -(pose->m[0][row] * pose->m[0][3] + pose->m[1][row] * pose->m[1][3] + pose->m[2][row] * pose->m[2][3]);
+  }
+  *frustum = (VROverlayProjection_t) { tangents[0], tangents[1], -tangents[3], -tangents[2] };
+  return true;
+}
+
 static bool validConfig(const OpenVRProjectionConfig* config) {
   if (!config || config->order == UINT32_MAX ||
       (config->colorSpace != EColorSpace_ColorSpace_Gamma && config->colorSpace != EColorSpace_ColorSpace_Linear) ||
@@ -37,7 +58,7 @@ static bool validConfig(const OpenVRProjectionConfig* config) {
         f->fLeft >= f->fRight || f->fTop >= f->fBottom) return false;
     for (unsigned int row = 0; row < 3; row++) {
       for (unsigned int column = 0; column < 4; column++) {
-        if (!isfinite(config->poses[eye].m[row][column])) return false;
+        if (!isfinite(config->views[eye].m[row][column])) return false;
       }
     }
   }
@@ -88,9 +109,9 @@ OpenVRProjectionResult lovrOpenVRProjectionConfigure(OpenVRProjection* p, const 
     APPLY(SetOverlayFlag(handle, VROverlayFlags_IgnoreTextureAlpha, false));
     APPLY(SetOverlaySortOrder(handle, config->order));
     APPLY(SetOverlayTextureColorSpace(handle, config->colorSpace));
-    HmdMatrix34_t pose = config->poses[eye];
+    HmdMatrix34_t view = config->views[eye];
     VROverlayProjection_t frustum = config->frusta[eye];
-    APPLY(SetOverlayTransformProjection(handle, config->origin, &pose, &frustum,
+    APPLY(SetOverlayTransformProjection(handle, config->origin, &view, &frustum,
       eye ? EVREye_Eye_Right : EVREye_Eye_Left));
 #undef APPLY
   }

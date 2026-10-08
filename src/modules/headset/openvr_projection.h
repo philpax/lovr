@@ -19,9 +19,11 @@ typedef struct {
   unsigned int eye;
 } OpenVRProjectionResult;
 
+// Each eye's arguments to SetOverlayTransformProjection, in the overlay API's own conventions: views
+// map the tracking origin to the eye, and frusta hold the downward edge's tangent in fTop.
 typedef struct {
   ETrackingUniverseOrigin origin;
-  HmdMatrix34_t poses[2];
+  HmdMatrix34_t views[2];
   VROverlayProjection_t frusta[2];
   EColorSpace colorSpace;
   uint32_t order;
@@ -50,5 +52,7 @@ OpenVRProjectionResult lovrOpenVRProjectionHide(OpenVRProjection* projection);
 OpenVRProjectionResult lovrOpenVRProjectionDestroy(OpenVRProjection* projection);
 bool lovrOpenVRProjectionHandoff(const gpu_external_image* image, void* data);
 bool lovrOpenVRProjectionPanelOrder(uint32_t mainOrder, uint32_t panelIndex, uint32_t* order);
+bool lovrOpenVRProjectionEye(const HmdMatrix34_t* pose, const float tangents[4], HmdMatrix34_t* view,
+  VROverlayProjection_t* frustum);
 
 #endif

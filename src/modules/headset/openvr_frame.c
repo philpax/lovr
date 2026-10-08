@@ -133,12 +133,13 @@ OpenVRFrameResult lovrOpenVRFrameUpdate(OpenVRFrame* frame, ETrackingUniverseOri
 bool lovrOpenVRFrameProjection(const float tangents[4], float near, float far, float matrix[16]) {
   if (!matrix || !tangents || !validTangents(tangents) || !isfinite(near) || near <= 0.f ||
       !isfinite(far) || (far != 0.f && far <= near)) return false;
+  // Raw tangents are in a Y-down eye space: top is negative above the axis and bottom is positive below it.
   double left = tangents[0], right = tangents[1], top = tangents[2], bottom = tangents[3];
   float projection[16] = { 0 };
   projection[0] = 2. / (right - left);
   projection[5] = 2. / (top - bottom);
   projection[8] = (right + left) / (right - left);
-  projection[9] = (top + bottom) / (top - bottom);
+  projection[9] = (top + bottom) / (bottom - top);
   projection[10] = far == 0.f ? 0.f : (double) near / (far - (double) near);
   projection[11] = -1.f;
   projection[14] = far == 0.f ? near : (double) near * far / (far - (double) near);

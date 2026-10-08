@@ -119,6 +119,10 @@ OpenVRProjectionResult lovrOpenVRProjectionShow(OpenVRProjection* projection) { 
 OpenVRProjectionResult lovrOpenVRProjectionHide(OpenVRProjection* projection) { (void) projection; return projectionStatus(); }
 OpenVRProjectionResult lovrOpenVRProjectionDestroy(OpenVRProjection* projection) { (void) projection; return projectionStatus(); }
 bool lovrOpenVRProjectionHandoff(const gpu_external_image* image, void* data) { (void) image; (void) data; abort(); }
+bool lovrOpenVRProjectionEye(const HmdMatrix34_t* pose, const float tangents[4], HmdMatrix34_t* view,
+    VROverlayProjection_t* frustum) {
+  (void) pose; (void) tangents; (void) view; (void) frustum; abort();
+}
 bool lovrOpenVRProjectionPanelOrder(uint32_t mainOrder, uint32_t panelIndex, uint32_t* order) {
   if (mainOrder == UINT32_MAX || panelIndex >= UINT32_MAX - mainOrder) return false;
   *order = mainOrder + 1 + panelIndex;
@@ -469,8 +473,8 @@ static bool asymmetricViewAngles(void) {
     CHECK(lovrHeadsetOpenVROps.HeadsetGetViewAngles(eye, &left, &right, &up, &down));
     CHECK(fabsf(left + atanf(tangents[eye][0])) < 1e-5f);
     CHECK(fabsf(right - atanf(tangents[eye][1])) < 1e-5f);
-    CHECK(fabsf(up - atanf(tangents[eye][3])) < 1e-5f);
-    CHECK(fabsf(down + atanf(tangents[eye][2])) < 1e-5f);
+    CHECK(fabsf(up + atanf(tangents[eye][2])) < 1e-5f);
+    CHECK(fabsf(down - atanf(tangents[eye][3])) < 1e-5f);
     float matrix[16], oracle[16];
     CHECK(lovrOpenVRFrameProjection(tangents[eye], .1f, 0.f, matrix));
     mat4_fov(oracle, left, right, up, down, .1f, 0.f);

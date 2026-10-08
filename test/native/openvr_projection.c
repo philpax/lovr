@@ -97,7 +97,7 @@ static void reset(void) {
 static OpenVRProjectionConfig config(void) {
   return (OpenVRProjectionConfig) {
     .origin = ETrackingUniverseOrigin_TrackingUniverseStanding,
-    .poses = { { .m = { { 0, 0, 1, -.03f }, { 0, 1, 0, 2 }, { -1, 0, 0, 3 } } },
+    .views = { { .m = { { 0, 0, 1, -.03f }, { 0, 1, 0, 2 }, { -1, 0, 0, 3 } } },
       { .m = { { 0, 0, 1, .03f }, { 0, 1, 0, 2 }, { -1, 0, 0, 3 } } } },
     .frusta = { { -1.1f, .9f, -.8f, 1.2f }, { -.9f, 1.1f, -1.2f, .8f } },
     .colorSpace = EColorSpace_ColorSpace_Gamma, .order = 20
@@ -116,6 +116,79 @@ static gpu_external_image image(unsigned int eye) {
     .image = 900 + eye, .queueFamily = 7, .width = 1200, .height = 1300, .format = 43, .samples = 1 };
 }
 
+// Field of view angles in OpenXR's convention: left and down are negative.
+typedef struct { float left, right, up, down; } Fov;
+
+// Raw tangents as an OpenVR driver reports them, in Y-down eye space.
+static void rawTangents(Fov f, float tangents[4]) {
+  tangents[0] = tanf(f.left); tangents[1] = tanf(f.right);
+  tangents[2] = tanf(-f.up); tangents[3] = tanf(-f.down);
+}
+
+static HmdMatrix34_t rigid(float yaw, float pitch, float x, float y, float z) {
+  float cy = cosf(yaw), sy = sinf(yaw), cp = cosf(pitch), sp = sinf(pitch);
+  return (HmdMatrix34_t) { .m = { { cy, sy * sp, sy * cp, x }, { 0, cp, -sp, y }, { -sy, cy * sp, cy * cp, z } } };
+}
+
+static bool close(float a, float b) { return fabsf(a - b) < 1e-5f; }
+
+static bool eyeConversion(void) {
+  Fov fovs[] = {
+    { -1.02f, .88f, 1.05f, -.86f }, { -.8f, .8f, .8f, -.8f }, { -.2f, .9f, .4f, .1f }, { -.6f, -.1f, -.2f, -.7f }
+  };
+  HmdMatrix34_t poses[] = {
+    rigid(0.f, 0.f, 0.f, 0.f, 0.f), rigid(.4f, -.35f, -.03f, 1.67f, .06f), rigid(-2.9f, 1.2f, 4.f, -2.f, .5f)
+  };
+  for (unsigned int i = 0; i < sizeof(poses) / sizeof(poses[0]); i++) {
+    for (unsigned int j = 0; j < sizeof(fovs) / sizeof(fovs[0]); j++) {
+      float tangents[4];
+      rawTangents(fovs[j], tangents);
+      HmdMatrix34_t view;
+      VROverlayProjection_t frustum;
+      CHECK(lovrOpenVRProjectionEye(&poses[i], tangents, &view, &frustum));
+      const HmdMatrix34_t* m = &poses[i];
+      // The view undoes the pose: view * pose is the identity.
+      for (unsigned int row = 0; row < 3; row++) {
+        for (unsigned int column = 0; column < 4; column++) {
+          float value = column == 3 ? view.m[row][3] : 0.f;
+          for (unsigned int k = 0; k < 3; k++) value += view.m[row][k] * m->m[k][column];
+          CHECK(close(value, row == column ? 1.f : 0.f));
+        }
+      }
+      // A point one metre ahead of the eye lands one metre ahead in the view's space.
+      float ahead[3];
+      for (unsigned int row = 0; row < 3; row++) ahead[row] = m->m[row][3] - m->m[row][2];
+      for (unsigned int row = 0; row < 3; row++) {
+        float value = view.m[row][3];
+        for (unsigned int k = 0; k < 3; k++) value += view.m[row][k] * ahead[k];
+        CHECK(close(value, row == 2 ? -1.f : 0.f));
+      }
+      // SteamVR's OpenXR runtime fills the overlay frustum as tan(left), tan(right), tan(down), tan(up).
+      CHECK(close(frustum.fLeft, tanf(fovs[j].left)) && close(frustum.fRight, tanf(fovs[j].right)));
+      CHECK(close(frustum.fTop, tanf(fovs[j].down)) && close(frustum.fBottom, tanf(fovs[j].up)));
+      CHECK(frustum.fTop < frustum.fBottom);
+    }
+  }
+  float tangents[4];
+  rawTangents(fovs[0], tangents);
+  HmdMatrix34_t view;
+  VROverlayProjection_t frustum;
+  CHECK(!lovrOpenVRProjectionEye(NULL, tangents, &view, &frustum));
+  CHECK(!lovrOpenVRProjectionEye(&poses[1], NULL, &view, &frustum));
+  CHECK(!lovrOpenVRProjectionEye(&poses[1], tangents, NULL, &frustum));
+  CHECK(!lovrOpenVRProjectionEye(&poses[1], tangents, &view, NULL));
+  HmdMatrix34_t broken = poses[1];
+  broken.m[1][3] = NAN;
+  CHECK(!lovrOpenVRProjectionEye(&broken, tangents, &view, &frustum));
+  float bad[4] = { tangents[0], tangents[1], tangents[2], INFINITY };
+  CHECK(!lovrOpenVRProjectionEye(&poses[1], bad, &view, &frustum));
+  float reversed[4] = { tangents[1], tangents[0], tangents[2], tangents[3] };
+  CHECK(!lovrOpenVRProjectionEye(&poses[1], reversed, &view, &frustum));
+  float inverted[4] = { tangents[0], tangents[1], tangents[3], tangents[2] };
+  CHECK(!lovrOpenVRProjectionEye(&poses[1], inverted, &view, &frustum));
+  return true;
+}
+
 static bool metadata(void) {
   reset();
   OpenVRProjection p = { 0 };
@@ -124,7 +197,7 @@ static bool metadata(void) {
   for (unsigned int eye = 0; eye < 2; eye++) {
     CHECK(p.eyes[eye] == 71 + eye && fake.flags[eye] == 3 && fake.orders[eye] == c.order);
     CHECK(fake.origins[eye] == c.origin && fake.spaces[eye] == c.colorSpace);
-    CHECK(memcmp(&fake.poses[eye], &c.poses[eye], sizeof(HmdMatrix34_t)) == 0);
+    CHECK(memcmp(&fake.poses[eye], &c.views[eye], sizeof(HmdMatrix34_t)) == 0);
     CHECK(memcmp(&fake.frusta[eye], &c.frusta[eye], sizeof(VROverlayProjection_t)) == 0);
     gpu_external_image source = image(eye);
     OpenVRProjectionHandoff h = { .projection = &p, .eye = eye };
@@ -278,6 +351,7 @@ static bool failureChecks(void) {
 
 int main(int argc, char** argv) {
   NativeTest tests[] = {
+    { "projection_eye_conversion", eyeConversion },
     { "projection_eye_mapping", metadata },
     { "projection_cleanup_retry", cleanupRetry },
     { "projection_partial_creation", partialCreation },
