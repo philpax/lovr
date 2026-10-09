@@ -6167,6 +6167,7 @@ bool lovrModelAnimate(Model* model, uint32_t animationIndex, float time, float a
       case PROP_SCALE: n = 3; break;
       case PROP_ROTATION: n = 4; break;
       case PROP_WEIGHTS: n = meta->meshes[meta->nodes[node].mesh].blendShapeCount; break;
+      default: lovrUnreachable();
     }
 
     float* property = allocate(&thread.stack, n * sizeof(float));
@@ -6238,6 +6239,7 @@ bool lovrModelAnimate(Model* model, uint32_t animationIndex, float time, float a
         ModelMesh* mesh = &meta->meshes[meta->nodes[node].mesh];
         dst = &model->blendShapeWeights[mesh->blendShapes - meta->blendShapes];
         break;
+      default: lovrUnreachable();
     }
 
     if (alpha >= 1.f) {

@@ -3603,8 +3603,8 @@ static bool openxrLayerSetCurve(Layer* layer, float curve) {
   XrPosef quadPose;
   openxrLayerGetPose(layer, &quadPose.position.x, &quadPose.orientation.x);
 
-  float width, height;
-  openxrLayerGetDimensions(layer, &width, &height);
+  float width = layer->curve == 0.f ? layer->quad.size.width : layer->cylinder.radius * layer->cylinder.centralAngle;
+  float height = layer->curve == 0.f ? layer->quad.size.height : width / layer->cylinder.aspectRatio;
 
   bool wasCylinder = layer->curve > 0.f;
   layer->curve = curve;

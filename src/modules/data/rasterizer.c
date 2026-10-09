@@ -209,8 +209,11 @@ static bool lovrRasterizerCreateBMF(Rasterizer** result, Blob* blob, Image* atla
       } else if (!memcmp(tag, "page", tagLength)) {
         size_t fileLength;
         const char* file = parseString(string, lineLength, &map, "file", &fileLength);
-        lovrCheck(file, "BMFont is missing image path");
-        lovrCheck(fileLength <= maxLength, "BMFont filename is too long");
+        if (!file || fileLength > maxLength) {
+          lovrSetError(!file ? "BMFont is missing image path" : "BMFont filename is too long");
+          map_free(&map);
+          goto fail;
+        }
         memcpy(filename, file, fileLength);
         filename[fileLength] = '\0';
       } else if (!memcmp(tag, "char", tagLength)) {
