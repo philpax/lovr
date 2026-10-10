@@ -1471,6 +1471,10 @@ static Texture* luax_opttexture(lua_State* L, int index) {
   texture = lovrTextureCreate(&info);
   lovrRelease(image, lovrImageDestroy);
   luax_assert(L, texture);
+  if (index < 0 && index > LUA_REGISTRYINDEX) index = lua_gettop(L) + index + 1;
+  luax_pushtype(L, Texture, texture);
+  lovrRelease(texture, lovrTextureDestroy);
+  lua_replace(L, index);
   return texture;
 }
 
@@ -1487,12 +1491,14 @@ static int l_lovrGraphicsNewMaterial(lua_State* L) {
 
   Material* material = lovrMaterialCreate(NULL);
   luax_assert(L, material);
+  luax_pushtype(L, Material, material);
+  lovrRelease(material, lovrMaterialDestroy);
 
   lua_getfield(L, 1, "color");
   if (!lua_isnil(L, -1)) {
     float color[4];
     luax_optcolor(L, -1, color);
-    lovrMaterialSetColor(material, color);
+    luax_assert(L, lovrMaterialSetColor(material, color));
   }
   lua_pop(L, 1);
 
@@ -1500,7 +1506,7 @@ static int l_lovrGraphicsNewMaterial(lua_State* L) {
   if (!lua_isnil(L, -1)) {
     float glow[4];
     luax_optcolor(L, -1, glow);
-    lovrMaterialSetGlow(material, glow);
+    luax_assert(L, lovrMaterialSetGlow(material, glow));
   }
   lua_pop(L, 1);
 
@@ -1550,34 +1556,34 @@ static int l_lovrGraphicsNewMaterial(lua_State* L) {
   }
   lua_pop(L, 1);
 
-  lovrMaterialSetQuad(material, quad);
+  luax_assert(L, lovrMaterialSetQuad(material, quad));
 
   lua_getfield(L, 1, "metalness");
-  if (!lua_isnil(L, -1)) lovrMaterialSetMetalness(material, luax_tofloat(L, -1));
+  if (!lua_isnil(L, -1)) { luax_assert(L, lovrMaterialSetMetalness(material, luax_tofloat(L, -1))); }
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "roughness");
-  if (!lua_isnil(L, -1)) lovrMaterialSetRoughness(material, luax_tofloat(L, -1));
+  if (!lua_isnil(L, -1)) { luax_assert(L, lovrMaterialSetRoughness(material, luax_tofloat(L, -1))); }
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "clearcoat");
-  if (!lua_isnil(L, -1)) lovrMaterialSetClearcoat(material, luax_tofloat(L, -1));
+  if (!lua_isnil(L, -1)) { luax_assert(L, lovrMaterialSetClearcoat(material, luax_tofloat(L, -1))); }
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "clearcoatRoughness");
-  if (!lua_isnil(L, -1)) lovrMaterialSetClearcoatRoughness(material, luax_tofloat(L, -1));
+  if (!lua_isnil(L, -1)) { luax_assert(L, lovrMaterialSetClearcoatRoughness(material, luax_tofloat(L, -1))); }
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "occlusionStrength");
-  if (!lua_isnil(L, -1)) lovrMaterialSetOcclusionStrength(material, luax_tofloat(L, -1));
+  if (!lua_isnil(L, -1)) { luax_assert(L, lovrMaterialSetOcclusionStrength(material, luax_tofloat(L, -1))); }
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "normalScale");
-  if (!lua_isnil(L, -1)) lovrMaterialSetNormalScale(material, luax_tofloat(L, -1));
+  if (!lua_isnil(L, -1)) { luax_assert(L, lovrMaterialSetNormalScale(material, luax_tofloat(L, -1))); }
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "alphaCutoff");
-  if (!lua_isnil(L, -1)) lovrMaterialSetAlphaCutoff(material, luax_tofloat(L, -1));
+  if (!lua_isnil(L, -1)) { luax_assert(L, lovrMaterialSetAlphaCutoff(material, luax_tofloat(L, -1))); }
   lua_pop(L, 1);
 
   lua_getfield(L, 1, "doubleSided");
@@ -1591,12 +1597,10 @@ static int l_lovrGraphicsNewMaterial(lua_State* L) {
       lua_pushfstring(L, "%sTexture", lovrMaterialTexture[i].string);
     }
     lua_gettable(L, 1);
-    if (!lua_isnil(L, -1)) lovrMaterialSetTexture(material, i, luax_opttexture(L, -1));
+    if (!lua_isnil(L, -1)) { luax_assert(L, lovrMaterialSetTexture(material, i, luax_opttexture(L, -1))); }
     lua_pop(L, 1);
   }
 
-  luax_pushtype(L, Material, material);
-  lovrRelease(material, lovrMaterialDestroy);
   return 1;
 }
 

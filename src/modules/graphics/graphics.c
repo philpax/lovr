@@ -4459,6 +4459,7 @@ static bool lovrMaterialAllocate(Material* material) {
       lovrFree(block->buffer);
       lovrFree(block->bundlePool);
       lovrFree(block->bundles);
+      lovrFree(block);
       mtx_unlock(&state.lock);
       return false;
     }
@@ -4470,10 +4471,11 @@ static bool lovrMaterialAllocate(Material* material) {
     };
 
     if (!gpu_buffer_init(block->buffer, &bufferInfo)) {
+      gpu_bundle_pool_destroy(block->bundlePool);
       lovrFree(block->buffer);
       lovrFree(block->bundlePool);
       lovrFree(block->bundles);
-      gpu_bundle_pool_destroy(block->bundlePool);
+      lovrFree(block);
       mtx_unlock(&state.lock);
       return false;
     }
@@ -4495,6 +4497,8 @@ static bool lovrMaterialAllocate(Material* material) {
     .buffer.extent = MATERIAL_STRIDE
   };
 
+  material->pointer = NULL;
+  material->bufferTick = ~0u;
   if (block->bufferPointer) {
     material->pointer = (MaterialData*) ((char*) block->bufferPointer + material->index * MATERIAL_STRIDE);
     material->bufferTick = state.tick;
@@ -4524,6 +4528,7 @@ static void lovrMaterialRecycle(Material* material) {
 
 static bool lovrMaterialUpload(Material* material, size_t offset, size_t size) {
   if (!checkMaterialSession(material)) return false;
+  if (!material->block && !lovrMaterialAllocate(material)) return false;
   if (material->bufferTick != state.tick) {
     mtx_lock(&state.lock);
     BufferView staging = getBuffer(GPU_BUFFER_STREAM, sizeof(MaterialData), 4);
@@ -4575,7 +4580,8 @@ Material* lovrMaterialCreate(Texture* texture) {
     }
   } else {
     if (!lovrMaterialAllocate(material)) {
-      return false;
+      lovrMaterialDestroy(material);
+      return NULL;
     }
 
     gpu_bundle_write(&material->bundle, &(gpu_bundle_info) {
@@ -4587,8 +4593,9 @@ Material* lovrMaterialCreate(Texture* texture) {
 
   if (material->pointer) {
     memcpy(material->pointer, &material->data, sizeof(MaterialData));
-  } else {
-    lovrMaterialUpload(material, 0, sizeof(MaterialData));
+  } else if (!lovrMaterialUpload(material, 0, sizeof(MaterialData))) {
+    lovrMaterialDestroy(material);
+    return NULL;
   }
 
   return material;
@@ -4755,28 +4762,35 @@ bool lovrMaterialSetTexture(Material* material, MaterialTexture type, Texture* t
     lovrCheck(texture->info.usage & TEXTURE_SAMPLE, "Textures must be created with the 'sample' usage to use them in Materials");
   }
 
-  lovrRelease(material->textures[type], lovrTextureDestroy);
-  material->textures[type] = texture;
-  material->bindings[type + 1].texture.object = (texture ? texture : state.defaultTexture)->sampleViewFloat;
-  lovrRetain(texture);
-
   gpu_bundle_info bundleInfo = { .layout = state.materialLayout->gpu };
+  bool replace = !material->block || material->bundleTick != state.tick;
 
-  if (material->bundleTick == state.tick) {
-    bundleInfo.bindings = &material->bindings[type + 1];
-    bundleInfo.count = 1;
-  } else {
-    lovrMaterialRecycle(material);
-
-    if (!lovrMaterialAllocate(material)) {
+  if (replace) {
+    Material replacement = *material;
+    replacement.block = NULL;
+    if (!lovrMaterialAllocate(&replacement)) return false;
+    if (!lovrMaterialUpload(&replacement, 0, sizeof(MaterialData))) {
+      lovrMaterialRecycle(&replacement);
       return false;
     }
-
-    bundleInfo.bindings = material->bindings;
-    bundleInfo.count = COUNTOF(material->bindings);
+    lovrMaterialRecycle(material);
+    material->block = replacement.block;
+    material->index = replacement.index;
+    material->bundle = replacement.bundle;
+    material->bundleTick = replacement.bundleTick;
+    material->bufferTick = replacement.bufferTick;
+    material->pointer = replacement.pointer;
+    material->bindings[0] = replacement.bindings[0];
   }
 
+  Texture* previous = material->textures[type];
+  lovrRetain(texture);
+  material->textures[type] = texture;
+  material->bindings[type + 1].texture.object = (texture ? texture : state.defaultTexture)->sampleViewFloat;
+  bundleInfo.bindings = replace ? material->bindings : &material->bindings[type + 1];
+  bundleInfo.count = replace ? COUNTOF(material->bindings) : 1;
   gpu_bundle_write(&material->bundle, &bundleInfo, 1);
+  lovrRelease(previous, lovrTextureDestroy);
 
   return true;
 }
@@ -5017,10 +5031,9 @@ static Glyph* lovrFontGetGlyph(Font* font, uint32_t codepoint, bool* resized) {
     }
 
     Material* material = lovrMaterialCreate(atlas);
-    lovrMaterialSetSdfRange(material, font->info.spread / newWidth, font->info.spread / newHeight);
-
-    if (!material) {
-      lovrTextureDestroy(atlas);
+    if (!material || !lovrMaterialSetSdfRange(material, font->info.spread / newWidth, font->info.spread / newHeight)) {
+      lovrRelease(material, lovrMaterialDestroy);
+      lovrRelease(atlas, lovrTextureDestroy);
       mtx_unlock(&font->lock);
       return NULL;
     }
@@ -5843,7 +5856,7 @@ Model* lovrModelCreate(const ModelInfo* info) {
       ModelMaterial* properties = &meta->materials[i];
       memcpy(&material->data, properties, sizeof(MaterialData));
       material->data.doubleSided = properties->doubleSided;
-      lovrMaterialUpload(material, 0, sizeof(MaterialData));
+      if (!lovrMaterialUpload(material, 0, sizeof(MaterialData))) goto fail;
 
       uint32_t textures[] = {
         [TEXTURE_COLOR] = properties->texture,
@@ -5879,7 +5892,7 @@ Model* lovrModelCreate(const ModelInfo* info) {
           if (!model->textures[index]) goto fail;
         }
 
-        lovrMaterialSetTexture(material, t, model->textures[index]);
+        if (!lovrMaterialSetTexture(material, t, model->textures[index])) goto fail;
       }
     }
   }
