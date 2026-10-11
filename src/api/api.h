@@ -159,6 +159,10 @@ bool luax_isquat(lua_State* L, int index);
 
 // Module helpers
 
+#ifndef LOVR_DISABLE_AUDIO
+extern const luaL_Reg lovrAudio[];
+#endif
+
 #ifndef LOVR_DISABLE_DATA
 struct Blob;
 struct Image;

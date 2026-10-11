@@ -325,7 +325,7 @@ static int l_lovrAudioNewAudioMesh(lua_State* L) {
   return 1;
 }
 
-static const luaL_Reg lovrAudio[] = {
+const luaL_Reg lovrAudio[] = {
   { "getSampleRate", l_lovrAudioGetSampleRate },
   { "getDevices", l_lovrAudioGetDevices },
   { "getDevice", l_lovrAudioGetDevice },
