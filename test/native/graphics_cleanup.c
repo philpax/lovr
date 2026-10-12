@@ -6,6 +6,7 @@
 #include "util.h"
 #include "../../src/modules/graphics/graphics.h"
 
+DESTROY(queryPool, VkQueryPool, "query-pool,")
 static unsigned graphicsDestroyedCalls;
 static bool selectionFrozen;
 void lovrHeadsetGraphicsDestroyed(void) {
@@ -51,9 +52,6 @@ static struct {
   void* defaultSamplers[2];
   void* defaultShaders[1];
   MaterialBlock* materials;
-  uint32_t pipelineCount;
-  void* pipelines;
-  void* pipelineLookup;
   void* bufferAllocators[1];
   Layout* layouts;
   mtx_t lock;
@@ -67,7 +65,7 @@ static void shellFree(void* pointer) {
 static bool disconnectFails;
 static bool partialShell;
 static bool shellDisconnect(void) {
-  if ((!state.initialized && !partialShell) || !state.pipelines || !shellThread.stack.memory) invalid = true;
+  if ((!state.initialized && !partialShell) || !state.timestamps || !shellThread.stack.memory) invalid = true;
   if (disconnectFails) {
     beforeDestroy();
     return false;
@@ -88,17 +86,13 @@ static void shellMutexDestroy(mtx_t* mutex) {
 #define thread shellThread
 #define lovrFree shellFree
 #define lovrRelease(object, destructor) ((void) (object))
-#define map_free(map) ((void) (map))
 #define destroyBuffers(allocator) ((void) (allocator))
-#define getPipeline(index) ((gpu_pipeline*) NULL)
 #include "graphics_destroy.inc"
 #undef mtx_destroy
 #undef thread
 #undef lovrFree
 #undef lovrRelease
-#undef map_free
 #undef destroyBuffers
-#undef getPipeline
 
 static bool shellRetry(void) {
   reset();
@@ -107,9 +101,11 @@ static bool shellRetry(void) {
   CHECK(lovrModuleAcquire(&ref));
   if (!partialShell) lovrModuleReady(&ref);
   state.initialized = !partialShell;
-  state.pipelines = malloc(1);
+  state.timestamps = malloc(sizeof(gpu_tally));
   shellThread.stack.memory = malloc(1);
-  CHECK(state.pipelines && shellThread.stack.memory);
+  CHECK(state.timestamps && shellThread.stack.memory);
+  *state.timestamps = (gpu_tally) { .handle = HANDLE(VkQueryPool) };
+  vkDestroyQueryPool = queryPool;
   CHECK(mtx_init(&state.lock, mtx_plain) == thrd_success);
   state.lockReady = true;
   gpuState.device = HANDLE(VkDevice);
@@ -124,21 +120,21 @@ static bool shellRetry(void) {
   lovrGraphicsDestroy();
   CHECK(!invalid && !strcmp(trace, "idle,"));
   CHECK(selectionFrozen && !graphicsDestroyedCalls);
-  CHECK(atomic_load(&ref) == reference && state.initialized == !partialShell && state.pipelines && shellThread.stack.memory);
+  CHECK(atomic_load(&ref) == reference && state.initialized == !partialShell && state.timestamps && shellThread.stack.memory);
   CHECK(gpuState.device && gpuState.config.vk.beforeDestroy == shellDisconnect && mutexes == 1);
   idleResult = VK_SUCCESS;
   disconnectFails = true;
   lovrGraphicsDestroy();
   CHECK(!invalid && !strcmp(trace, "idle,idle,callback,"));
   CHECK(selectionFrozen && !graphicsDestroyedCalls);
-  CHECK(atomic_load(&ref) == reference && state.initialized == !partialShell && state.pipelines && shellThread.stack.memory);
+  CHECK(atomic_load(&ref) == reference && state.initialized == !partialShell && state.timestamps && shellThread.stack.memory);
   CHECK(gpuState.device && gpuState.config.vk.beforeDestroy == shellDisconnect && mutexes == 1);
   disconnectFails = false;
   lovrGraphicsDestroy();
   CHECK(!invalid && !mutexes && !locks && !gpuState.device);
   CHECK(!selectionFrozen && graphicsDestroyedCalls == 1);
-  CHECK(!state.initialized && !state.pipelines && !shellThread.stack.memory && !atomic_load(&ref));
-  CHECK(!strcmp(trace, "idle,idle,callback,callback,retire,view,runtime-images,shell-free,device,instance,shell-free,"));
+  CHECK(!state.initialized && !state.timestamps && !shellThread.stack.memory && !atomic_load(&ref));
+  CHECK(!strcmp(trace, "idle,idle,callback,callback,retire,view,runtime-images,shell-free,query-pool,device,instance,shell-free,"));
   return true;
 }
 static bool shellPartialRetry(void) {

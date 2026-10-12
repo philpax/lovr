@@ -8,6 +8,14 @@ struct gpu_buffer { void* pointer; };
 static unsigned textureDestroys;
 static unsigned bufferDestroys;
 static unsigned tallyDestroys;
+static unsigned pipelineDestroys;
+static unsigned pipelineCreates;
+static unsigned shaderDestroys;
+static bool pipelineInitFails;
+static bool pipelineSlow;
+static bool pipelineWorker;
+static fn_job* pendingPipelineJob;
+static void* pendingPipelineArgument;
 static unsigned liveViews;
 static bool runtimeAlive = true;
 static bool prepareFails;
@@ -36,8 +44,8 @@ void gpu_texture_destroy(gpu_texture* texture) {
 void gpu_buffer_destroy(gpu_buffer* buffer) { if (!runtimeAlive) abort(); lovrFree(buffer->pointer); buffer->pointer = NULL; bufferDestroys++; }
 void gpu_tally_destroy(gpu_tally* tally) { (void) tally; if (!runtimeAlive) abort(); tallyDestroys++; }
 void gpu_sampler_destroy(gpu_sampler* sampler) { (void) sampler; if (!runtimeAlive) abort(); }
-void gpu_shader_destroy(gpu_shader* shader) { (void) shader; }
-void gpu_pipeline_destroy(gpu_pipeline* pipeline) { (void) pipeline; }
+void gpu_shader_destroy(gpu_shader* shader) { (void) shader; shaderDestroys++; }
+void gpu_pipeline_destroy(gpu_pipeline* pipeline) { (void) pipeline; pipelineDestroys++; deferredDestroys++; }
 void gpu_tree_destroy(gpu_tree* tree) { (void) tree; }
 char* gpu_get_error(void) { return error; }
 #ifndef LOVR_LAYER_GRAPHICS_HARNESS
@@ -129,13 +137,33 @@ size_t gpu_sizeof_pipeline(void) { return 8; }
 size_t gpu_sizeof_shader(void) { return 8; }
 size_t gpu_sizeof_layout(void) { return 8; }
 bool gpu_tally_init(gpu_tally* tally, gpu_tally_info* info) { (void) tally; (void) info; return true; }
-bool gpu_pipeline_init_graphics(gpu_pipeline* pipeline, gpu_pipeline_info* info, bool* slow) { abort(); }
-bool gpu_pipeline_init_compute(gpu_pipeline* pipeline, gpu_compute_pipeline_info* info) { (void) pipeline; (void) info; return true; }
+bool gpu_pipeline_init_graphics(gpu_pipeline* pipeline, gpu_pipeline_info* info, bool* slow) {
+  (void) pipeline; (void) info;
+  pipelineCreates++;
+  if (slow) *slow = pipelineSlow;
+  return !pipelineInitFails;
+}
+bool gpu_pipeline_init_compute(gpu_pipeline* pipeline, gpu_compute_pipeline_info* info) {
+  (void) pipeline; (void) info;
+  pipelineCreates++;
+  return !pipelineInitFails;
+}
 bool gpu_shader_init(gpu_shader* shader, gpu_shader_info* info) { (void) shader; (void) info; return true; }
 bool gpu_layout_init(gpu_layout* layout, gpu_layout_info* info) { (void) layout; (void) info; return true; }
 bool gpu_submit(gpu_stream** streams, uint32_t count, uint32_t tick) { abort(); }
-bool job_start(fn_job* fn, void* arg) { abort(); }
-void job_spin(void) { abort(); }
+bool job_start(fn_job* fn, void* arg) {
+  if (!pipelineWorker) return false;
+  if (pendingPipelineJob) abort();
+  pendingPipelineJob = fn;
+  pendingPipelineArgument = arg;
+  return true;
+}
+void job_spin(void) {
+  if (!pendingPipelineJob) abort();
+  fn_job* fn = pendingPipelineJob;
+  pendingPipelineJob = NULL;
+  fn(pendingPipelineArgument);
+}
 double os_get_time(void) { abort(); }
 #ifndef LOVR_LAYER_GRAPHICS_HARNESS
 bool lovrHeadsetIsActive(void) { abort(); }
@@ -470,8 +498,6 @@ static bool recordedTextureBinding(bool compute) {
   Sampler sampler = { 0 };
   state.builtinLayout = &builtin;
   state.defaultSamplers[FILTER_LINEAR] = &sampler;
-  state.pipelines = lovrCalloc(8);
-  state.pipelineCount = 0;
   state.limits.workgroupSize[0] = state.limits.workgroupSize[1] = state.limits.workgroupSize[2] = 1;
   state.limits.workgroupCount[0] = state.limits.workgroupCount[1] = state.limits.workgroupCount[2] = 1;
   state.limits.totalWorkgroupSize = 1;
@@ -528,9 +554,6 @@ static bool recordedTextureBinding(bool compute) {
     mtx_destroy(&layout->lock);
     lovrFree(layout);
   }
-  lovrFree(state.pipelines);
-  state.pipelines = NULL;
-  state.pipelineCount = 0;
   lovrFree(thread.stack.memory);
   thread.stack = (Allocator) { 0 };
   state.builtinLayout = NULL;
@@ -713,8 +736,110 @@ static bool selectiveInvalidation(void) {
   return true;
 }
 
+static bool shaderPipelineLifetime(void) {
+  pipelineCreates = pipelineDestroys = shaderDestroys = deferredDestroys = 0;
+  Shader* parent = lovrCalloc(sizeof(Shader) + gpu_sizeof_shader());
+  parent->ref = 1;
+  parent->gpu = (gpu_shader*) (parent + 1);
+  parent->info.type = SHADER_COMPUTE;
+  parent->flagCount = 1;
+  parent->flags = lovrCalloc(sizeof(gpu_shader_flag));
+  parent->flags[0].id = 0;
+  parent->flags[0].type = GPU_FLAG_I32;
+  parent->flagLookup = lovrCalloc(sizeof(uint32_t));
+  CHECK(lovrShaderInit(parent));
+  ShaderFlag flag = { .id = 0, .value = 7 };
+  Shader* clone = lovrShaderClone(parent, &flag, 1);
+  CHECK(clone && clone->flags[0].value.i32 == 7);
+  CHECK(atomic_load(&parent->ref) == 2);
+  lovrRelease(parent, lovrShaderDestroy);
+  CHECK(shaderDestroys == 0 && pipelineDestroys == 0);
+  lovrRelease(clone, lovrShaderDestroy);
+  CHECK(shaderDestroys == 1 && pipelineCreates == 2);
+  CHECK(pipelineDestroys == 2 && deferredDestroys == 2);
+  return true;
+}
+
+static bool shaderPipelineCache(void) {
+  initAllocator(&thread.stack);
+  pipelineCreates = pipelineDestroys = deferredDestroys = 0;
+  gpu_shader_flag flags = { .id = 0, .type = GPU_FLAG_I32 };
+  gpu_pipeline_info info = { .shader = (gpu_shader*) &flags, .flags = &flags };
+  for (uint32_t i = 0; i < 9000; i++) {
+    Shader* shader = lovrCalloc(sizeof(Shader) + gpu_sizeof_shader());
+    shader->gpu = (gpu_shader*) (shader + 1);
+    PipelineJob* jobs = NULL;
+    gpu_pipeline* pipeline = getShaderPipeline(shader, &info, &jobs);
+    CHECK(pipeline && finishPipelineJobs(jobs, true));
+    unsigned created = pipelineCreates;
+    CHECK(getShaderPipeline(shader, &info, &jobs) == pipeline && pipelineCreates == created);
+    CHECK(shader->pipelineLookup.used == 1);
+    lovrShaderDestroy(shader);
+    CHECK(pipelineDestroys == i + 1);
+    thread.stack.cursor = 0;
+  }
+  CHECK(pipelineCreates == 9000 && pipelineDestroys == 9000);
+
+  Shader* parent = lovrCalloc(sizeof(Shader) + gpu_sizeof_shader());
+  parent->ref = 1;
+  parent->gpu = (gpu_shader*) (parent + 1);
+  parent->flags = lovrCalloc(sizeof(gpu_shader_flag));
+  parent->flagLookup = lovrCalloc(sizeof(uint32_t));
+  Shader* clone = lovrShaderClone(parent, NULL, 0);
+  CHECK(clone);
+  PipelineJob* jobs = NULL;
+  gpu_pipeline* a = getShaderPipeline(parent, &info, &jobs);
+  gpu_pipeline* b = getShaderPipeline(clone, &info, &jobs);
+  CHECK(a != b && finishPipelineJobs(jobs, true));
+  CHECK(parent->pipelineLookup.used == 1 && clone->pipelineLookup.used == 1);
+  lovrRelease(parent, lovrShaderDestroy);
+  lovrRelease(clone, lovrShaderDestroy);
+  CHECK(pipelineDestroys == 9002);
+
+  parent = lovrCalloc(sizeof(Shader) + gpu_sizeof_shader());
+  parent->ref = 1;
+  parent->gpu = (gpu_shader*) (parent + 1);
+  pipelineSlow = pipelineWorker = true;
+  jobs = NULL;
+  CHECK(getShaderPipeline(parent, &info, &jobs));
+  CHECK(pendingPipelineJob && !jobs->done);
+  pipelineInitFails = true;
+  gpu_pipeline_info changed = info;
+  changed.viewCount = 2;
+  CHECK(!getShaderPipeline(parent, &changed, &jobs));
+  CHECK(!finishPipelineJobs(jobs, false) && !pendingPipelineJob);
+  pipelineInitFails = pipelineSlow = pipelineWorker = false;
+  lovrRelease(parent, lovrShaderDestroy);
+  CHECK(pipelineDestroys == 9004);
+  lovrFree(thread.stack.memory);
+  thread.stack = (Allocator) { 0 };
+  return true;
+}
+
+static bool shaderCloneFailure(void) {
+  Shader* parent = lovrCalloc(sizeof(Shader) + gpu_sizeof_shader());
+  parent->ref = 1;
+  parent->gpu = (gpu_shader*) (parent + 1);
+  parent->flags = lovrCalloc(sizeof(gpu_shader_flag));
+  parent->flagLookup = lovrCalloc(sizeof(uint32_t));
+  ShaderFlag missing = { .id = 1 };
+  CHECK(!lovrShaderClone(parent, &missing, 1));
+  CHECK(atomic_load(&parent->ref) == 1);
+  parent->info.type = SHADER_COMPUTE;
+  unsigned retired = pipelineDestroys;
+  pipelineInitFails = true;
+  CHECK(!lovrShaderClone(parent, NULL, 0));
+  pipelineInitFails = false;
+  CHECK(atomic_load(&parent->ref) == 1 && pipelineDestroys == retired + 1);
+  lovrRelease(parent, lovrShaderDestroy);
+  return true;
+}
+
 int main(int argc, char** argv) {
   NativeTest tests[] = {
+    { "graphics.session.shader-pipeline-lifetime", shaderPipelineLifetime },
+    { "graphics.session.shader-pipeline-cache", shaderPipelineCache },
+    { "graphics.session.shader-clone-failure", shaderCloneFailure },
     { "graphics.session.texture-lifetime", textureLifetime },
     { "graphics.session.pass-lifetime", passLifetime },
     { "graphics.session.stale-sample", staleSample },
