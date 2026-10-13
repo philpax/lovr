@@ -592,6 +592,12 @@ struct Pass {
   uint32_t pipelineIndex;
   gpu_binding* bindings;
   void* uniforms;
+  struct {
+    gpu_binding bindings[MAX_SHADER_RESOURCES];
+    void* uniforms;
+    void* uniformData;
+    uint32_t uniformCapacity;
+  } shaderStack[PIPELINE_STACK_SIZE];
   uint32_t computeCount;
   Compute* computes;
   uint32_t drawCount;
@@ -7299,6 +7305,7 @@ void lovrPassReset(Pass* pass) {
   pass->draws = lovrPassAllocate(pass, pass->drawCapacity * sizeof(Draw));
 
   memset(&pass->geocache, 0, sizeof(pass->geocache));
+  memset(pass->shaderStack, 0, sizeof(pass->shaderStack));
 
   pass->tally.active = false;
   pass->tally.count = 0;
@@ -7759,14 +7766,27 @@ bool lovrPassPush(Pass* pass, StackType stack) {
       mat4_init(pass->transform + 16, pass->transform);
       pass->transform += 16;
       return true;
-    case STACK_STATE:
+    case STACK_STATE: {
       lovrCheck(++pass->pipelineIndex < PIPELINE_STACK_SIZE, "%s stack overflow (more pushes than pops?)", "Pipeline");
+      uint32_t index = pass->pipelineIndex;
+      Shader* shader = pass->pipeline->shader;
+      memcpy(pass->shaderStack[index].bindings, pass->bindings, sizeof(pass->shaderStack[index].bindings));
+      pass->shaderStack[index].uniforms = pass->uniforms;
+      if (shader && shader->uniformCount > 0) {
+        if (shader->uniformSize > pass->shaderStack[index].uniformCapacity) {
+          pass->shaderStack[index].uniformCapacity = MAX(shader->uniformSize, 2 * pass->shaderStack[index].uniformCapacity);
+          pass->shaderStack[index].uniformData = lovrPassAllocate(pass, pass->shaderStack[index].uniformCapacity);
+        }
+        // Sends can mutate the current uniform data without changing shaders.
+        memcpy(pass->shaderStack[index].uniformData, pass->uniforms, shader->uniformSize);
+      }
       memcpy(pass->pipeline + 1, pass->pipeline, sizeof(Pipeline));
       pass->pipeline++;
       lovrRetain(pass->pipeline->font);
       lovrRetain(pass->pipeline->shader);
       lovrRetain(pass->pipeline->material);
       return true;
+    }
     default: return true;
   }
 }
@@ -7778,14 +7798,23 @@ bool lovrPassPop(Pass* pass, StackType stack) {
       lovrCheck(--pass->transformIndex < TRANSFORM_STACK_SIZE, "%s stack underflow (more pops than pushes?)", "Transform");
       pass->transform -= 16;
       return true;
-    case STACK_STATE:
+    case STACK_STATE: {
       lovrRelease(pass->pipeline->font, lovrFontDestroy);
       lovrRelease(pass->pipeline->shader, lovrShaderDestroy);
       lovrRelease(pass->pipeline->material, lovrMaterialDestroy);
       lovrCheck(--pass->pipelineIndex < PIPELINE_STACK_SIZE, "%s stack underflow (more pops than pushes?)", "Pipeline");
       pass->pipeline--;
+      uint32_t index = pass->pipelineIndex + 1;
+      Shader* shader = pass->pipeline->shader;
+      memcpy(pass->bindings, pass->shaderStack[index].bindings, sizeof(pass->shaderStack[index].bindings));
+      pass->uniforms = pass->shaderStack[index].uniforms;
+      if (shader && shader->uniformCount > 0) {
+        memcpy(pass->uniforms, pass->shaderStack[index].uniformData, shader->uniformSize);
+      }
+      pass->flags |= DIRTY_UNIFORMS | DIRTY_BINDINGS;
       pass->pipeline->dirty = true;
       return true;
+    }
     default: return true;
   }
 }
