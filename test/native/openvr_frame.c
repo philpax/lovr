@@ -118,9 +118,10 @@ static bool predictedPose(void) {
   OpenVRFrame frame = setup();
   CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.).status == OPENVR_FRAME_OK);
   CHECK(fake.waits == 1 && fake.clocks == 1 && fake.poses == 1 && fake.timeout > 0 && fake.timeout <= 100);
-  CHECK(closeTo(fake.prediction, .011));
+  // The compositor frame in progress displays at 10.008, so the content reaches the next one at 10.018.
+  CHECK(closeTo(fake.prediction, .021));
   CHECK(frame.snapshot.width == 1200 && frame.snapshot.height == 1300);
-  CHECK(frame.snapshot.frequency == 100.f && closeTo(frame.snapshot.time, 10.011));
+  CHECK(frame.snapshot.frequency == 100.f && closeTo(frame.snapshot.time, 10.021));
   CHECK(frame.snapshot.head.valid && frame.snapshot.eyes[0].pose.valid);
   CHECK(closeTo(frame.snapshot.eyes[0].pose.position[0], 2.02));
   CHECK(closeTo(frame.snapshot.eyes[0].pose.position[1], 3.01));
@@ -168,43 +169,42 @@ static bool sessionClock(void) {
   OpenVRFrame frame = setup();
   fake.waitAdvance = .05;
   CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 399.95).status == OPENVR_FRAME_OK);
-  CHECK(closeTo(frame.snapshot.time, 400.011) && fake.clocks == 1);
+  CHECK(closeTo(frame.snapshot.time, 400.021) && fake.clocks == 1);
   frame = setup();
   CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 400.).status == OPENVR_FRAME_OK);
   fake.vsync = .009f;
   CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 400.01).status == OPENVR_FRAME_OK);
-  CHECK(closeTo(frame.snapshot.displayTime, .013) && closeTo(frame.snapshot.delta, .003));
+  // The second candidate lies within half a period of the first target, so it moves a period later.
+  CHECK(closeTo(frame.snapshot.displayTime, .023) && closeTo(frame.snapshot.delta, .013));
   CHECK(!closeTo(frame.snapshot.delta, .01));
   frame = setup();
   CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 400.).status == OPENVR_FRAME_OK);
   CHECK(closeTo(frame.snapshot.displayTime, .01) && closeTo(frame.snapshot.displayPeriod, .01));
   CHECK(closeTo(frame.snapshot.delta, .01));
   fake.error = EVROverlayError_VROverlayError_TimedOut;
-  fake.vsync = .009f;
   double previous = frame.lastDisplayTime;
   double epoch = frame.epoch;
-  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 400.001).status == OPENVR_FRAME_INVALID);
-  CHECK(frame.snapshot.displayTime == 0. && frame.epoch == epoch);
-  CHECK(frame.snapshot.delta == 0. && !frame.snapshot.head.valid && !frame.snapshot.eyes[0].pose.valid);
-  CHECK(frame.lastDisplayTime == previous);
-  fake.vsync = .008f;
-  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 400.001).status == OPENVR_FRAME_INVALID);
-  CHECK(frame.snapshot.displayTime == 0. && frame.snapshot.delta == 0.);
-  CHECK(frame.lastDisplayTime == previous && frame.epoch == epoch);
-  for (unsigned i = 0; i < 20; i++) {
-    fake.vsync = i % 2 == 0 ? .002f : .009f;
-    OpenVRFrameResult result = updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 400.001);
-    CHECK(frame.epoch == epoch && frame.snapshot.delta >= 0.);
-    if (i % 2 == 0) {
-      CHECK(result.status == OPENVR_FRAME_TIMEOUT && frame.snapshot.head.valid);
-      CHECK(closeTo(frame.snapshot.displayTime, frame.snapshot.time - epoch));
-      if (i > 0) CHECK(frame.snapshot.displayTime == previous && frame.snapshot.delta == 0.);
-      previous = frame.snapshot.displayTime;
-    } else {
-      CHECK(result.status == OPENVR_FRAME_INVALID && frame.snapshot.delta == 0.);
-      CHECK(frame.snapshot.displayTime == 0. && !frame.snapshot.head.valid && frame.lastDisplayTime == previous);
-    }
+  // Syncs that would land on the vsync the previous frame targets move to the next one, so the display
+  // time advances by a period each time instead of standing still or running backwards.
+  for (unsigned i = 0; i < 3; i++) {
+    fake.vsync = .003f;
+    CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 400.001).status == OPENVR_FRAME_TIMEOUT);
+    CHECK(frame.epoch == epoch && frame.snapshot.head.valid);
+    CHECK(closeTo(frame.snapshot.displayTime, previous + .01) && closeTo(frame.snapshot.delta, .01));
+    previous = frame.snapshot.displayTime;
   }
+  fake.vsync = .009f;
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 400.001).status == OPENVR_FRAME_TIMEOUT);
+  // A shifted vsync phase moves the target to the first vsync of the new phase after the previous target.
+  CHECK(frame.snapshot.displayTime > previous + .005 && frame.snapshot.displayTime < previous + .015);
+  previous = frame.snapshot.displayTime;
+  // An epoch that runs ahead of the session clock still rejects a display time behind the last one.
+  frame.epoch -= 1.;
+  frame.lastDisplayTime += 2.;
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 400.001).status == OPENVR_FRAME_INVALID);
+  CHECK(frame.snapshot.displayTime == 0. && frame.snapshot.delta == 0. && !frame.snapshot.head.valid);
+  frame.epoch = epoch;
+  frame.lastDisplayTime = previous;
   CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 400.02).status == OPENVR_FRAME_TIMEOUT);
   CHECK(closeTo(frame.snapshot.displayTime, frame.snapshot.time - frame.epoch));
   previous = frame.snapshot.displayTime;
@@ -273,7 +273,7 @@ static bool invalidInputs(void) {
   frame = setup();
   fake.vsync = 120.f;
   CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.).status == OPENVR_FRAME_OK);
-  CHECK(frame.snapshot.prediction >= fake.photons && frame.snapshot.prediction <= .01f + fake.photons);
+  CHECK(frame.snapshot.prediction >= .01f + fake.photons && frame.snapshot.prediction <= .02f + fake.photons);
   frame = setup();
   fake.frequency = 1.f;
   CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.).status == OPENVR_FRAME_OK);
@@ -367,9 +367,36 @@ static bool frustumEdges(void) {
   return true;
 }
 
+static bool submissionWork(void) {
+  OpenVRFrame frame = setup();
+  lovrOpenVRFrameSubmitted(&frame, 10.);
+  CHECK(frame.work == 0. && !frame.hasSync);
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.).status == OPENVR_FRAME_OK);
+  CHECK(closeTo(frame.snapshot.time, 10.021));
+  lovrOpenVRFrameSubmitted(&frame, 9.9);
+  lovrOpenVRFrameSubmitted(&frame, NAN);
+  CHECK(frame.work == 0. && frame.hasSync);
+  // Work that outlasts one compositor frame reaches the one after, displayed a period later.
+  lovrOpenVRFrameSubmitted(&frame, 10.014);
+  CHECK(closeTo(frame.work, .014) && !frame.hasSync);
+  lovrOpenVRFrameSubmitted(&frame, 10.5);
+  CHECK(closeTo(frame.work, .014));
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.02).status == OPENVR_FRAME_OK);
+  CHECK(closeTo(fake.prediction, .031) && closeTo(frame.snapshot.time, 10.051));
+  lovrOpenVRFrameSubmitted(&frame, 10.025);
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.04).status == OPENVR_FRAME_OK);
+  CHECK(closeTo(frame.snapshot.time, 10.061) && closeTo(frame.snapshot.delta, .01));
+  // A stall does not extrapolate the pose more than three compositor frames past the current one.
+  lovrOpenVRFrameSubmitted(&frame, 12.);
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 12.).status == OPENVR_FRAME_OK);
+  CHECK(closeTo(fake.prediction, .041));
+  return true;
+}
+
 int main(int argc, char** argv) {
   NativeTest tests[] = {
     { "predicted_pose_conversion", predictedPose },
+    { "prediction_submission_work", submissionWork },
     { "overlay_frame_timeout", timeoutProgress },
     { "frame_invalid_inputs", invalidInputs },
     { "frame_session_clock_reset", sessionClock },

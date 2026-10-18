@@ -55,8 +55,13 @@ typedef struct {
   double epoch;
   double lastDisplayTime;
   double lastDisplayPeriod;
+  double syncTime;
+  double work;
+  double lastTarget;
   bool updated;
   bool hasEpoch;
+  bool hasSync;
+  bool hasTarget;
 } OpenVRFrame;
 
 void lovrOpenVRFrameInit(OpenVRFrame* frame, struct VR_IVRSystem_FnTable* system,
@@ -64,6 +69,9 @@ void lovrOpenVRFrameInit(OpenVRFrame* frame, struct VR_IVRSystem_FnTable* system
 typedef double (*OpenVRFrameClock)(void* context);
 OpenVRFrameResult lovrOpenVRFrameUpdate(OpenVRFrame* frame, ETrackingUniverseOrigin origin,
   OpenVRFrameClock clock, void* context);
+// Records when the frame that the last update began finished submitting, so the next prediction
+// accounts for the compositor frames that the application's work spans.
+void lovrOpenVRFrameSubmitted(OpenVRFrame* frame, double now);
 bool lovrOpenVRFrameProjection(const float tangents[4], float near, float far, float matrix[16]);
 
 #endif

@@ -972,8 +972,7 @@ static bool abandonPanel(Layer* layer) {
   return false;
 }
 
-static bool submit(void) {
-  lovrAssert(active(), "openvr: presentation is stopped");
+static bool submitFrame(void) {
   bool ok = submitScene();
   char sceneError[1024] = { 0 };
   if (!ok) snprintf(sceneError, sizeof(sceneError), "%s", lovrGetError());
@@ -1021,6 +1020,12 @@ static bool submit(void) {
     if (!panelResult(lovrOpenVRPanelShow(&layer->panel))) return false;
   }
   return true;
+}
+static bool submit(void) {
+  lovrAssert(active(), "openvr: presentation is stopped");
+  bool ok = submitFrame();
+  lovrOpenVRFrameSubmitted(&state.frame, os_get_time());
+  return ok;
 }
 static void setDevicePose(Device device, float* position, float* orientation) { (void) device; (void) position; (void) orientation; }
 static void setButton(Device device, DeviceButton button, bool down) { (void) device; (void) button; (void) down; }

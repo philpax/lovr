@@ -8,6 +8,10 @@ static bool makePose(OpenVRFramePose* pose, const HmdMatrix34_t* matrix);
 static HmdMatrix34_t compose(const HmdMatrix34_t* head, const HmdMatrix34_t* eye);
 static bool validTangents(const float* tangents);
 static void updateClock(OpenVRFrame* frame, OpenVRFrameSnapshot* snapshot);
+static double targetVsync(const OpenVRFrame* frame, double now, double period, double vsync);
+
+// A pose predicted further ahead extrapolates head motion past the point where it helps.
+#define MAX_COMPOSITES_AHEAD 3.
 
 void lovrOpenVRFrameInit(OpenVRFrame* frame, struct VR_IVRSystem_FnTable* system,
     struct VR_IVROverlay_FnTable* overlay) {
@@ -86,7 +90,8 @@ OpenVRFrameResult lovrOpenVRFrameUpdate(OpenVRFrame* frame, ETrackingUniverseOri
   }
   snapshot.frequency = frequency;
   float period = 1.f / frequency;
-  snapshot.prediction = period - fmodf(vsync, period) + photons;
+  double target = targetVsync(frame, now, period, vsync);
+  snapshot.prediction = (float) (target - now + photons);
   snapshot.time = now + snapshot.prediction;
   if (!isfinite(snapshot.time) || snapshot.time <= now || snapshot.time - snapshot.displayPeriod == snapshot.time) {
     frame->lastNow = previousNow;
@@ -126,8 +131,18 @@ OpenVRFrameResult lovrOpenVRFrameUpdate(OpenVRFrame* frame, ETrackingUniverseOri
   }
   updateClock(frame, &snapshot);
   frame->snapshot = snapshot;
+  frame->syncTime = now;
+  frame->hasSync = true;
+  frame->lastTarget = target;
+  frame->hasTarget = true;
   result.status = result.error == EVROverlayError_VROverlayError_TimedOut ? OPENVR_FRAME_TIMEOUT : OPENVR_FRAME_OK;
   return result;
+}
+
+void lovrOpenVRFrameSubmitted(OpenVRFrame* frame, double now) {
+  if (!frame || !frame->hasSync || !isfinite(now) || now < frame->syncTime) return;
+  frame->work = now - frame->syncTime;
+  frame->hasSync = false;
 }
 
 bool lovrOpenVRFrameProjection(const float tangents[4], float near, float far, float matrix[16]) {
@@ -160,6 +175,18 @@ static void updateClock(OpenVRFrame* frame, OpenVRFrameSnapshot* snapshot) {
   snapshot->delta = fmax(0., snapshot->displayTime - frame->lastDisplayTime);
   frame->lastDisplayTime = snapshot->displayTime;
   frame->lastDisplayPeriod = snapshot->displayPeriod;
+}
+
+// WaitFrameSync returns as the compositor begins a frame, and that frame is displayed at the next vsync.
+// A texture set afterwards reaches the first compositor frame to begin after the submission ends, which
+// the previous frame's work estimates. Two frames never target the same vsync, so jitter in that
+// estimate cannot move the display time backwards.
+static double targetVsync(const OpenVRFrame* frame, double now, double period, double vsync) {
+  double composites = fmin(fmax(ceil(frame->work / period), 1.), MAX_COMPOSITES_AHEAD);
+  double target = now + period - fmod(vsync, period) + composites * period;
+  double earliest = frame->lastTarget + .5 * period;
+  if (frame->hasTarget && target < earliest) target += ceil((earliest - target) / period) * period;
+  return target;
 }
 
 static bool validMatrix(const HmdMatrix34_t* matrix) {
