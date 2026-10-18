@@ -905,6 +905,16 @@ static bool handoff(const gpu_external_image* image, void* data) {
   lovrAssert(error == EVROverlayError_VROverlayError_None, "openvr: texture submission error %d", error);
   return true;
 }
+// The eyes stay visible while they are reconfigured, so a failure after configuration hides them rather
+// than leave a new transform showing an earlier frame's texture.
+static bool abandonScene(void) {
+  char error[1024];
+  snprintf(error, sizeof(error), "%s", lovrGetError());
+  OpenVRProjectionResult hidden = lovrOpenVRProjectionHide(&state.scene.projection);
+  lovrSetError("%s; rollback: %s eye %u error %d (cleanup %d)", error,
+    hidden.operation ? hidden.operation : "ok", hidden.eye, hidden.error, hidden.cleanupError);
+  return false;
+}
 static bool submitScene(void) {
   OpenVRProjection* projection = &state.scene.projection;
   if (!state.main || !state.scene.requested || !state.scene.captured || !state.scene.texture || !state.scene.output[0] || !state.scene.output[1] ||
@@ -939,19 +949,26 @@ static bool submitScene(void) {
   uint32_t extent[3] = { state.scene.render.width, state.scene.render.height, 1 };
   for (unsigned eye = 0; eye < 2; eye++) {
     uint32_t source[4] = { 0, 0, eye, 0 }, target[4] = { 0 };
-    if (!lovrTextureCopy(state.scene.texture, state.scene.output[eye], source, target, extent)) return false;
+    if (!lovrTextureCopy(state.scene.texture, state.scene.output[eye], source, target, extent)) return abandonScene();
     OpenVRProjectionHandoff handoff = { .projection = projection, .eye = eye };
     if (!lovrGraphicsHandoffTexture(state.scene.output[eye], lovrOpenVRProjectionHandoff, &handoff, NULL)) {
       if (handoff.result.status != OPENVR_PROJECTION_OK) projectionResult(handoff.result);
-      return false;
+      return abandonScene();
     }
   }
   OpenVRProjectionResult shown = lovrOpenVRProjectionShow(projection);
   if (shown.status == OPENVR_PROJECTION_OK) return true;
-  OpenVRProjectionResult hidden = lovrOpenVRProjectionHide(projection);
-  lovrSetError("openvr: %s: projection eye %u error %d (cleanup %d); rollback: %s eye %u error %d (cleanup %d)",
-    shown.operation ? shown.operation : "show", shown.eye, shown.error, shown.cleanupError,
-    hidden.operation ? hidden.operation : "ok", hidden.eye, hidden.error, hidden.cleanupError);
+  projectionResult(shown);
+  return abandonScene();
+}
+
+// A panel stays visible while it is reconfigured, so a failed copy or handoff hides it rather than leave
+// new properties showing an earlier frame's texture.
+static bool abandonPanel(Layer* layer) {
+  char error[1024];
+  snprintf(error, sizeof(error), "%s", lovrGetError());
+  OpenVRPanelResult hidden = lovrOpenVRPanelHide(&layer->panel);
+  lovrSetError("%s; rollback: %s error %d", error, hidden.operation ? hidden.operation : "ok", hidden.error);
   return false;
 }
 
@@ -993,10 +1010,10 @@ static bool submit(void) {
         uint32_t target[4] = { eye * extent[0], 0, 0, 0 };
         uint32_t crop[3] = { layer->viewport[2], layer->viewport[3], 1 };
         if (crop[0] == extent[0] && crop[1] == extent[1]) {
-          if (!lovrTextureCopy(layer->texture, layer->output, source, target, extent)) return false;
-        } else if (!lovrTextureBlit(layer->texture, layer->output, source, target, crop, extent, FILTER_LINEAR)) return false;
+          if (!lovrTextureCopy(layer->texture, layer->output, source, target, extent)) return abandonPanel(layer);
+        } else if (!lovrTextureBlit(layer->texture, layer->output, source, target, crop, extent, FILTER_LINEAR)) return abandonPanel(layer);
       }
-      if (!lovrGraphicsHandoffTexture(layer->output, handoff, layer, NULL)) return false;
+      if (!lovrGraphicsHandoffTexture(layer->output, handoff, layer, NULL)) return abandonPanel(layer);
       layer->viewportDirty = false;
       layer->submitted = true;
       layer->frozen = layer->ownership.info.immutable;

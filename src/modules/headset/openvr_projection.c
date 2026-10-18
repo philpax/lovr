@@ -65,6 +65,12 @@ static bool validConfig(const OpenVRProjectionConfig* config) {
   return true;
 }
 
+static OpenVRProjectionResult abandonProjectionConfiguration(OpenVRProjection* p, OpenVRProjectionResult status) {
+  OpenVRProjectionResult hidden = lovrOpenVRProjectionHide(p);
+  if (hidden.status != OPENVR_PROJECTION_OK) status.cleanupError = hidden.error;
+  return status;
+}
+
 OpenVRProjectionResult lovrOpenVRProjectionCreate(OpenVRProjection* p,
     struct VR_IVROverlay_FnTable* api, const char* keys[2], const char* names[2], const OpenVRProjectionConfig* config) {
   if (!p || p->api || p->eyes[0] || p->eyes[1] || !api || !validConfig(config) || !keys || !names ||
@@ -93,31 +99,43 @@ OpenVRProjectionResult lovrOpenVRProjectionCreate(OpenVRProjection* p,
   return status;
 }
 
+// A visible eye is never hidden to reconfigure it, because SteamVR would composite frames without the
+// scene. A failed setter leaves the eyes partly configured, so they are hidden and the next configuration
+// applies every property again.
 OpenVRProjectionResult lovrOpenVRProjectionConfigure(OpenVRProjection* p, const OpenVRProjectionConfig* config) {
   if (!p || !p->api || !p->eyes[0] || !p->eyes[1] || !validConfig(config)) {
     return result(OPENVR_PROJECTION_INVALID, "configure", 0, 0);
   }
+  bool all = !p->configured;
+  const OpenVRProjectionConfig* last = &p->applied;
   p->configured = false;
-  OpenVRProjectionResult status = lovrOpenVRProjectionHide(p);
-  if (status.status != OPENVR_PROJECTION_OK) return status;
   p->submitted[0] = p->submitted[1] = false;
+  OpenVRProjectionResult status = result(OPENVR_PROJECTION_OK, NULL, 0, 0);
   for (unsigned int eye = 0; eye < 2; eye++) {
     VROverlayHandle_t handle = p->eyes[eye];
-#define APPLY(call) do { status = runtimeResult(#call, eye, p->api->call); if (status.status != OPENVR_PROJECTION_OK) return status; } while (0)
-    APPLY(SetOverlayFlag(handle, VROverlayFlags_NoBackside, true));
-    APPLY(SetOverlayFlag(handle, VROverlayFlags_IsPremultiplied, true));
-    APPLY(SetOverlayFlag(handle, VROverlayFlags_IgnoreTextureAlpha, false));
-    APPLY(SetOverlaySortOrder(handle, config->order));
-    APPLY(SetOverlayTextureColorSpace(handle, config->colorSpace));
+    bool moved = config->origin != last->origin ||
+      memcmp(&config->views[eye], &last->views[eye], sizeof(config->views[eye])) ||
+      memcmp(&config->frusta[eye], &last->frusta[eye], sizeof(config->frusta[eye]));
+#define APPLY(changed, call) do { \
+    if (all || (changed)) { \
+      status = runtimeResult(#call, eye, p->api->call); \
+      if (status.status != OPENVR_PROJECTION_OK) return abandonProjectionConfiguration(p, status); \
+    } \
+  } while (0)
+    APPLY(false, SetOverlayFlag(handle, VROverlayFlags_NoBackside, true));
+    APPLY(false, SetOverlayFlag(handle, VROverlayFlags_IsPremultiplied, true));
+    APPLY(false, SetOverlayFlag(handle, VROverlayFlags_IgnoreTextureAlpha, false));
+    APPLY(config->order != last->order, SetOverlaySortOrder(handle, config->order));
+    APPLY(config->colorSpace != last->colorSpace, SetOverlayTextureColorSpace(handle, config->colorSpace));
     HmdMatrix34_t view = config->views[eye];
     VROverlayProjection_t frustum = config->frusta[eye];
-    APPLY(SetOverlayTransformProjection(handle, config->origin, &view, &frustum,
+    APPLY(moved, SetOverlayTransformProjection(handle, config->origin, &view, &frustum,
       eye ? EVREye_Eye_Right : EVREye_Eye_Left));
 #undef APPLY
   }
-  p->colorSpace = config->colorSpace;
+  p->applied = *config;
   p->configured = true;
-  return result(OPENVR_PROJECTION_OK, NULL, 0, 0);
+  return status;
 }
 
 OpenVRProjectionResult lovrOpenVRProjectionShow(OpenVRProjection* p) {
@@ -126,6 +144,7 @@ OpenVRProjectionResult lovrOpenVRProjectionShow(OpenVRProjection* p) {
   }
   OpenVRProjectionResult status = result(OPENVR_PROJECTION_OK, NULL, 0, 0);
   for (unsigned int eye = 0; eye < 2; eye++) {
+    if (p->visible[eye]) continue;
     OpenVRProjectionResult next = runtimeResult("ShowOverlay", eye, p->api->ShowOverlay(p->eyes[eye]));
     if (next.status == OPENVR_PROJECTION_OK) p->visible[eye] = true;
     else if (status.status == OPENVR_PROJECTION_OK) status = next;
@@ -139,10 +158,10 @@ OpenVRProjectionResult lovrOpenVRProjectionHide(OpenVRProjection* p) {
   OpenVRProjectionResult status = result(OPENVR_PROJECTION_OK, NULL, 0, 0);
   for (unsigned int eye = 0; eye < 2; eye++) {
     if (!p->eyes[eye]) continue;
+    p->visible[eye] = false;
     OpenVRProjectionResult next = runtimeResult("HideOverlay", eye, p->api->HideOverlay(p->eyes[eye]));
-    if (next.status == OPENVR_PROJECTION_OK) p->visible[eye] = false;
-    else if (status.status == OPENVR_PROJECTION_OK) status = next;
-    else status.cleanupError = next.error;
+    if (next.status != OPENVR_PROJECTION_OK && status.status == OPENVR_PROJECTION_OK) status = next;
+    else if (next.status != OPENVR_PROJECTION_OK) status.cleanupError = next.error;
   }
   return status;
 }
@@ -153,9 +172,9 @@ OpenVRProjectionResult lovrOpenVRProjectionDestroy(OpenVRProjection* p) {
   OpenVRProjectionResult status = result(OPENVR_PROJECTION_OK, NULL, 0, 0);
   for (unsigned int eye = 0; eye < 2; eye++) {
     if (!p->eyes[eye]) continue;
+    p->visible[eye] = false;
     OpenVRProjectionResult next = runtimeResult("HideOverlay", eye, p->api->HideOverlay(p->eyes[eye]));
     if (next.status == OPENVR_PROJECTION_OK) {
-      p->visible[eye] = false;
       next = runtimeResult("DestroyOverlay", eye, p->api->DestroyOverlay(p->eyes[eye]));
       if (next.status == OPENVR_PROJECTION_OK) {
         p->eyes[eye] = 0;
@@ -182,8 +201,8 @@ bool lovrOpenVRProjectionHandoff(const gpu_external_image* image, void* data) {
   bool srgb = image->format == OPENVR_FORMAT_RGBA8_SRGB || image->format == OPENVR_FORMAT_BGRA8_SRGB;
   bool linear = image->format == OPENVR_FORMAT_RGBA8_UNORM || image->format == OPENVR_FORMAT_BGRA8_UNORM ||
     image->format == OPENVR_FORMAT_RGBA16_FLOAT;
-  if ((!srgb && !linear) || (srgb && p->colorSpace != EColorSpace_ColorSpace_Gamma) ||
-      (linear && p->colorSpace != EColorSpace_ColorSpace_Linear)) return false;
+  if ((!srgb && !linear) || (srgb && p->applied.colorSpace != EColorSpace_ColorSpace_Gamma) ||
+      (linear && p->applied.colorSpace != EColorSpace_ColorSpace_Linear)) return false;
   VRVulkanTextureData_t vulkan = {
     .m_nImage = image->image, .m_pDevice = (struct VkDevice_T*) image->device,
     .m_pPhysicalDevice = (struct VkPhysicalDevice_T*) image->physicalDevice,
@@ -191,7 +210,7 @@ bool lovrOpenVRProjectionHandoff(const gpu_external_image* image, void* data) {
     .m_nQueueFamilyIndex = image->queueFamily, .m_nWidth = image->width, .m_nHeight = image->height,
     .m_nFormat = image->format, .m_nSampleCount = image->samples
   };
-  Texture_t texture = { .handle = &vulkan, .eType = ETextureType_TextureType_Vulkan, .eColorSpace = p->colorSpace };
+  Texture_t texture = { .handle = &vulkan, .eType = ETextureType_TextureType_Vulkan, .eColorSpace = p->applied.colorSpace };
   h->result = runtimeResult("SetOverlayTexture", h->eye, p->api->SetOverlayTexture(p->eyes[h->eye], &texture));
   p->submitted[h->eye] = h->result.status == OPENVR_PROJECTION_OK;
   return p->submitted[h->eye];

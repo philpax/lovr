@@ -4,9 +4,9 @@
 
 static struct {
   unsigned int creates, destroys[2], hides[2], shows[2], textures[2];
-  unsigned int flags[2], orders[2];
+  unsigned int flags[2], orders[2], properties[2], projections[2];
   bool valid, failCreate, failConfigure;
-  int failHide, failDestroy, failShow, failTexture;
+  int failHide, failDestroy, failShow, failTexture, failProjection;
   EColorSpace spaces[2];
   ETrackingUniverseOrigin origins[2];
   HmdMatrix34_t poses[2];
@@ -55,12 +55,16 @@ static EVROverlayError OPENVR_FNTABLE_CALLTYPE flag(VROverlayHandle_t handle, VR
 }
 
 static EVROverlayError OPENVR_FNTABLE_CALLTYPE order(VROverlayHandle_t handle, uint32_t value) {
-  fake.orders[indexOf(handle)] = value;
+  unsigned int eye = indexOf(handle);
+  fake.orders[eye] = value;
+  fake.properties[eye]++;
   return 0;
 }
 
 static EVROverlayError OPENVR_FNTABLE_CALLTYPE space(VROverlayHandle_t handle, EColorSpace value) {
-  fake.spaces[indexOf(handle)] = value;
+  unsigned int eye = indexOf(handle);
+  fake.spaces[eye] = value;
+  fake.properties[eye]++;
   return 0;
 }
 
@@ -71,7 +75,8 @@ static EVROverlayError OPENVR_FNTABLE_CALLTYPE projection(VROverlayHandle_t hand
   fake.origins[i] = origin;
   fake.poses[i] = *pose;
   fake.frusta[i] = *frustum;
-  return 0;
+  fake.projections[i]++;
+  return fake.failProjection == (int) i ? EVROverlayError_VROverlayError_RequestFailed : 0;
 }
 
 static EVROverlayError OPENVR_FNTABLE_CALLTYPE texture(VROverlayHandle_t handle, Texture_t* texture) {
@@ -91,7 +96,7 @@ static struct VR_IVROverlay_FnTable api = {
 static void reset(void) {
   memset(&fake, 0, sizeof(fake));
   fake.valid = true;
-  fake.failHide = fake.failDestroy = fake.failShow = fake.failTexture = -1;
+  fake.failHide = fake.failDestroy = fake.failShow = fake.failTexture = fake.failProjection = -1;
 }
 
 static OpenVRProjectionConfig config(void) {
@@ -247,7 +252,7 @@ static bool cleanupRetry(void) {
     p.visible[0] = p.visible[1] = true;
     fake.failHide = eye;
     CHECK(lovrOpenVRProjectionHide(&p).status == OPENVR_PROJECTION_RUNTIME_ERROR);
-    CHECK(p.visible[eye] && !p.visible[1 - eye]);
+    CHECK(!p.visible[0] && !p.visible[1]);
     CHECK(lovrOpenVRProjectionDestroy(&p).status == OPENVR_PROJECTION_RUNTIME_ERROR);
     CHECK(p.eyes[eye] == (VROverlayHandle_t) (71 + eye) && !p.eyes[1 - eye] && p.api);
     CHECK(fake.destroys[eye] == 0 && fake.destroys[1 - eye] == 1);
@@ -266,7 +271,7 @@ static bool cleanupRetry(void) {
   fake.failHide = 2;
   OpenVRProjectionResult r = lovrOpenVRProjectionHide(&p);
   CHECK(r.status == OPENVR_PROJECTION_RUNTIME_ERROR && r.error && r.cleanupError);
-  CHECK(p.eyes[0] == 71 && p.eyes[1] == 72 && p.visible[0] && p.visible[1]);
+  CHECK(p.eyes[0] == 71 && p.eyes[1] == 72 && !p.visible[0] && !p.visible[1]);
   r = lovrOpenVRProjectionDestroy(&p);
   CHECK(r.status == OPENVR_PROJECTION_RUNTIME_ERROR && r.error && r.cleanupError);
   CHECK(p.eyes[0] == 71 && p.eyes[1] == 72 && !fake.destroys[0] && !fake.destroys[1]);
@@ -349,10 +354,60 @@ static bool failureChecks(void) {
   return true;
 }
 
+static bool submitBoth(OpenVRProjection* p) {
+  for (unsigned int eye = 0; eye < 2; eye++) {
+    OpenVRProjectionHandoff h = { .projection = p, .eye = eye };
+    gpu_external_image source = image(eye);
+    if (!lovrOpenVRProjectionHandoff(&source, &h)) return false;
+  }
+  return lovrOpenVRProjectionShow(p).status == OPENVR_PROJECTION_OK;
+}
+
+static bool reconfigureInPlace(void) {
+  reset();
+  OpenVRProjection p = { 0 };
+  CHECK(start(&p).status == OPENVR_PROJECTION_OK && !fake.hides[0] && !fake.hides[1]);
+  CHECK(submitBoth(&p) && fake.shows[0] == 1 && fake.shows[1] == 1);
+  OpenVRProjectionConfig c = config();
+  reset();
+  CHECK(lovrOpenVRProjectionConfigure(&p, &c).status == OPENVR_PROJECTION_OK);
+  CHECK(lovrOpenVRProjectionShow(&p).status == OPENVR_PROJECTION_INVALID && p.visible[0] && p.visible[1]);
+  CHECK(submitBoth(&p) && fake.textures[0] == 1 && fake.textures[1] == 1);
+  for (unsigned int eye = 0; eye < 2; eye++) {
+    CHECK(!fake.flags[eye] && !fake.properties[eye] && !fake.projections[eye]);
+    CHECK(!fake.hides[eye] && !fake.shows[eye]);
+  }
+  c.views[1].m[0][3] = .04f;
+  CHECK(lovrOpenVRProjectionConfigure(&p, &c).status == OPENVR_PROJECTION_OK);
+  CHECK(!fake.projections[0] && fake.projections[1] == 1 && fake.poses[1].m[0][3] == .04f);
+  c.order = 21;
+  c.origin = ETrackingUniverseOrigin_TrackingUniverseSeated;
+  CHECK(lovrOpenVRProjectionConfigure(&p, &c).status == OPENVR_PROJECTION_OK);
+  CHECK(fake.properties[0] == 1 && fake.properties[1] == 1 && fake.orders[1] == 21);
+  CHECK(fake.projections[0] == 1 && fake.projections[1] == 2 && fake.origins[0] == c.origin);
+  CHECK(!fake.hides[0] && !fake.hides[1] && p.visible[0] && p.visible[1]);
+  reset();
+  c.frusta[1].fLeft = -1.f;
+  fake.failProjection = 1;
+  OpenVRProjectionResult r = lovrOpenVRProjectionConfigure(&p, &c);
+  CHECK(r.status == OPENVR_PROJECTION_RUNTIME_ERROR && r.eye == 1 && !r.cleanupError && !p.configured);
+  CHECK(fake.hides[0] == 1 && fake.hides[1] == 1 && !p.visible[0] && !p.visible[1]);
+  reset();
+  CHECK(lovrOpenVRProjectionConfigure(&p, &c).status == OPENVR_PROJECTION_OK);
+  for (unsigned int eye = 0; eye < 2; eye++) {
+    CHECK(fake.flags[eye] == 3 && fake.properties[eye] == 2 && fake.projections[eye] == 1);
+  }
+  CHECK(submitBoth(&p) && fake.shows[0] == 1 && fake.shows[1] == 1);
+  CHECK(lovrOpenVRProjectionDestroy(&p).status == OPENVR_PROJECTION_OK);
+  CHECK(fake.valid);
+  return true;
+}
+
 int main(int argc, char** argv) {
   NativeTest tests[] = {
     { "projection_eye_conversion", eyeConversion },
     { "projection_eye_mapping", metadata },
+    { "projection_reconfigure_in_place", reconfigureInPlace },
     { "projection_cleanup_retry", cleanupRetry },
     { "projection_partial_creation", partialCreation },
     { "projection_failure_checks", failureChecks }

@@ -29,13 +29,15 @@ typedef struct {
   uint32_t order;
 } OpenVRProjectionConfig;
 
+// applied holds the configuration last applied while configured is set, so a configuration sets only
+// what changed. visible means SteamVR is known to show the eye; any hide attempt clears it.
 typedef struct {
   struct VR_IVROverlay_FnTable* api;
   VROverlayHandle_t eyes[2];
   bool visible[2];
   bool submitted[2];
   bool configured;
-  EColorSpace colorSpace;
+  OpenVRProjectionConfig applied;
 } OpenVRProjection;
 
 typedef struct {

@@ -349,11 +349,11 @@ static bool stereoTransport(void) {
   CHECK(setLayers(&layer, 1, false));
   copies = handoffs = textureSubmits = 0;
   failHandoff = true;
-  CHECK(!submit() && !layer->frozen);
+  CHECK(!submit() && !layer->frozen && hides == 1);
   CHECK(copies == 2 && copiedEye[0] == 0 && copiedEye[1] == 1 && copiedX[0] == 0 && copiedX[1] == 64);
   copies = 0; failHandoff = false;
   CHECK(submit() && layer->frozen && textureSubmits == 1);
-  CHECK(setLayers(NULL, 0, false) && submit() && hides == 1);
+  CHECK(setLayers(NULL, 0, false) && submit() && hides == 2);
   CHECK(setLayers(&layer, 1, false) && submit() && textureSubmits == 1 && handoffs == 2);
   int32_t crop[4] = { 16, 8, 32, 16 };
   blits = 0;

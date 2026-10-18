@@ -36,6 +36,7 @@
 #define lovrOpenVRPanelHide testedPanelHide
 #define lovrOpenVRPanelDestroy testedPanelDestroy
 OpenVRPanelResult testedPanelConfigure(OpenVRPanel* panel, const OpenVRPanelConfig* config);
+OpenVRPanelResult testedPanelHide(OpenVRPanel* panel);
 OpenVRPanelResult testedPanelDestroy(OpenVRPanel* panel);
 #include "../../src/modules/headset/openvr_overlay.c"
 #undef lovrOpenVRPanelCreate
@@ -163,7 +164,7 @@ static unsigned runtimeDestroyCalls, runtimeHideCalls, shutdownDrainBaseline;
 static unsigned projectionCreates, failProjectionCreate, runtimeCreates;
 static bool projectionMode, failSceneConfigure, failSceneHandoff, failSceneShow, failSceneHide, failPanelHide;
 static bool panelVisible, showAttempted;
-static unsigned sceneHideCalls;
+static unsigned sceneHideCalls, runtimeShowCalls, runtimeFlagCalls;
 static HmdMatrix34_t submittedPoses[2];
 static VROverlayProjection_t submittedFrusta[2];
 static Texture* runtimeBacking;
@@ -200,12 +201,13 @@ static EVROverlayError OPENVR_FNTABLE_CALLTYPE runtimeHide(VROverlayHandle_t han
   return runtimeHideFails ? EVROverlayError_VROverlayError_RequestFailed : EVROverlayError_VROverlayError_None;
 }
 static EVROverlayError OPENVR_FNTABLE_CALLTYPE runtimeShow(VROverlayHandle_t handle) {
+  runtimeShowCalls++;
   if (handle == 73) panelVisible = true;
   if (failSceneShow && handle == 82) { showAttempted = true; return EVROverlayError_VROverlayError_RequestFailed; }
   return EVROverlayError_VROverlayError_None;
 }
 static EVROverlayError OPENVR_FNTABLE_CALLTYPE runtimeFlag(VROverlayHandle_t handle, VROverlayFlags flag, bool enabled) {
-  (void) handle; (void) flag; (void) enabled; return EVROverlayError_VROverlayError_None;
+  (void) handle; (void) flag; (void) enabled; runtimeFlagCalls++; return EVROverlayError_VROverlayError_None;
 }
 static EVROverlayError OPENVR_FNTABLE_CALLTYPE runtimeColor(VROverlayHandle_t handle, float r, float g, float b) {
   (void) handle; (void) r; (void) g; (void) b; return EVROverlayError_VROverlayError_None;
@@ -359,15 +361,15 @@ static bool panelCanvas(void) {
   state.features.formats[FORMAT_D24S8][0] = GPU_FEATURE_RENDER;
   LayerInfo info = { .width = 64, .height = 32, .stereo = true, .filter = true, .transparent = true };
   Layer* budget[MAX_LAYERS];
-  unsigned createdBefore = runtimeHideCalls;
+  unsigned hidesBefore = runtimeHideCalls;
   for (unsigned i = 0; i < limit(); i++) CHECK((budget[i] = layerCreate(&info)));
-  CHECK(runtimeHideCalls == createdBefore + limit());
+  CHECK(runtimeHideCalls == hidesBefore);
   unsigned texturesBefore = textureCreates, overlaysBefore = runtimeCreates;
   Layer* registryBefore = vrState.all;
   unsigned refsBefore = atomic_load(&budget[0]->ownership.ref);
   CHECK(!layerCreate(&info) && strstr(lovrGetError(), "panel budget"));
   CHECK(textureCreates == texturesBefore && runtimeCreates == overlaysBefore && vrState.all == registryBefore &&
-    atomic_load(&budget[0]->ownership.ref) == refsBefore && runtimeHideCalls == createdBefore + limit());
+    atomic_load(&budget[0]->ownership.ref) == refsBefore && runtimeHideCalls == hidesBefore);
   overlayPolls = 0;
   CHECK(pollEvents() && overlayPolls == limit());
   vrState.scene.projection.eyes[0] = 81; vrState.scene.projection.eyes[1] = 82;
@@ -552,9 +554,17 @@ static bool sceneCanvas(void) {
   CHECK(submittedFrusta[0].fLeft == -1.1f && submittedFrusta[1].fRight == 1.2f);
   CHECK(vrState.scene.projection.visible[0] && vrState.scene.projection.visible[1]);
   CHECK(panelVisible);
+  // A steady frame keeps every overlay shown, because SteamVR would composite a hidden one's absence.
+  unsigned steadyHides = runtimeHideCalls, steadyShows = runtimeShowCalls, steadyFlags = runtimeFlagCalls;
+  sceneCopies = sceneSubmissions = panelCopies = panelSubmissions = 0;
+  CHECK(submit() && sceneSubmissions == 2 && panelSubmissions == 1 && panelVisible);
+  CHECK(runtimeHideCalls == steadyHides && runtimeShowCalls == steadyShows && runtimeFlagCalls == steadyFlags);
   CHECK(setLayers(NULL, 0, true));
+  // An unchanged pose is not reapplied, so the eye moves to make the transform call fail.
+  vrState.scene.render.eyes[0].transform.m[0][3] += .01f;
   failSceneConfigure = true;
   CHECK(!submit() && !panelVisible && strstr(lovrGetError(), "SetOverlayTransformProjection"));
+  CHECK(!vrState.scene.projection.visible[0] && !vrState.scene.projection.visible[1]);
   failSceneConfigure = false;
   sceneCopies = sceneSubmissions = 0;
   CHECK(setLayers(&panel, 1, true) && submit() && panelVisible);
@@ -569,7 +579,7 @@ static bool sceneCanvas(void) {
   failSceneShow = true;
   unsigned hidesBefore = sceneHideCalls;
   sceneCopies = sceneSubmissions = 0;
-  CHECK(!submit() && sceneHideCalls == hidesBefore + 4);
+  CHECK(!submit() && sceneHideCalls == hidesBefore + 2);
   CHECK(!vrState.scene.projection.visible[0] && !vrState.scene.projection.visible[1]);
   CHECK(lovrTextureIsValid(root) && lovrPassIsValid(pass));
   failSceneHide = true; showAttempted = false;

@@ -74,6 +74,12 @@ static OpenVRPanelResult validate(const OpenVRPanelConfig* config, VRTextureBoun
   return result(OPENVR_PANEL_OK, NULL, 0);
 }
 
+static OpenVRPanelResult abandonPanelConfiguration(OpenVRPanel* panel, OpenVRPanelResult status) {
+  OpenVRPanelResult hidden = lovrOpenVRPanelHide(panel);
+  if (hidden.status != OPENVR_PANEL_OK) status.cleanupError = hidden.error;
+  return status;
+}
+
 OpenVRPanelResult lovrOpenVRPanelCreate(OpenVRPanel* panel, struct VR_IVROverlay_FnTable* api,
     const char* key, const char* name, const OpenVRPanelConfig* config) {
   if (!panel || panel->handle || panel->api || !api || !key || !*key || !name || !*name) {
@@ -109,51 +115,83 @@ OpenVRPanelResult lovrOpenVRPanelCreate(OpenVRPanel* panel, struct VR_IVROverlay
   return status;
 }
 
+// A visible overlay is never hidden to reconfigure it, because SteamVR would composite frames without it.
+// A failed setter leaves the overlay partly configured, so it is hidden and the next configuration
+// applies every property again.
 OpenVRPanelResult lovrOpenVRPanelConfigure(OpenVRPanel* panel, const OpenVRPanelConfig* config) {
   if (!panel || !panel->api || !panel->handle) return result(OPENVR_PANEL_INVALID, "configure", 0);
   VRTextureBounds_t bounds;
   float aspect;
   OpenVRPanelResult status = validate(config, &bounds, &aspect);
   if (status.status != OPENVR_PANEL_OK) return status;
+  OpenVRPanelApplied next = {
+    .premultiplied = config->premultiplied,
+    .ignoreTextureAlpha = config->ignoreTextureAlpha,
+    .sideBySide = config->textureLayout == OPENVR_PANEL_TEXTURE_SIDE_BY_SIDE_2D,
+    .colorSpace = config->colorSpace,
+    .color = { config->color[0], config->color[1], config->color[2], config->color[3] },
+    .order = config->order,
+    .width = config->width,
+    .bounds = bounds,
+    .aspect = aspect,
+    .curvature = config->curve < 1e-3f ? 0.f :
+      (float) fmin(1., (double) config->width * config->curve / 6.28318530717958647692),
+    .transform = config->transform,
+    .origin = config->origin,
+    .device = config->device,
+    .pose = config->pose
+  };
+  bool all = !panel->configured;
+  const OpenVRPanelApplied* last = &panel->applied;
+  bool moved = next.transform != last->transform || memcmp(&next.pose, &last->pose, sizeof(next.pose)) ||
+    (next.transform == OPENVR_PANEL_ABSOLUTE ? next.origin != last->origin : next.device != last->device);
   panel->configured = false;
   struct VR_IVROverlay_FnTable* api = panel->api;
   VROverlayHandle_t handle = panel->handle;
-#define APPLY(call) do { status = runtimeResult(#call, api->call); if (status.status != OPENVR_PANEL_OK) return status; } while (0)
-  APPLY(HideOverlay(handle));
-  APPLY(SetOverlayFlag(handle, VROverlayFlags_NoBackside, true));
-  APPLY(SetOverlayFlag(handle, VROverlayFlags_IsPremultiplied, config->premultiplied));
-  APPLY(SetOverlayFlag(handle, VROverlayFlags_IgnoreTextureAlpha, config->ignoreTextureAlpha));
-  APPLY(SetOverlayFlag(handle, VROverlayFlags_SideBySide_Parallel,
-    config->textureLayout == OPENVR_PANEL_TEXTURE_SIDE_BY_SIDE_2D));
-  APPLY(SetOverlayTextureColorSpace(handle, config->colorSpace));
-  APPLY(SetOverlayColor(handle, config->color[0], config->color[1], config->color[2]));
-  APPLY(SetOverlayAlpha(handle, config->color[3]));
-  APPLY(SetOverlaySortOrder(handle, config->order));
-  APPLY(SetOverlayWidthInMeters(handle, config->width));
-  APPLY(SetOverlayTextureBounds(handle, &bounds));
-  APPLY(SetOverlayTexelAspect(handle, aspect));
-  float curvature = config->curve < 1e-3f ? 0.f :
-    (float) fmin(1., (double) config->width * config->curve / 6.28318530717958647692);
-  APPLY(SetOverlayCurvature(handle, curvature));
-  HmdMatrix34_t pose = config->pose;
-  if (config->transform == OPENVR_PANEL_ABSOLUTE) {
-    APPLY(SetOverlayTransformAbsolute(handle, config->origin, &pose));
+#define APPLY(changed, call) do { \
+    if (all || (changed)) { \
+      status = runtimeResult(#call, api->call); \
+      if (status.status != OPENVR_PANEL_OK) return abandonPanelConfiguration(panel, status); \
+    } \
+  } while (0)
+  APPLY(false, SetOverlayFlag(handle, VROverlayFlags_NoBackside, true));
+  APPLY(next.premultiplied != last->premultiplied,
+    SetOverlayFlag(handle, VROverlayFlags_IsPremultiplied, next.premultiplied));
+  APPLY(next.ignoreTextureAlpha != last->ignoreTextureAlpha,
+    SetOverlayFlag(handle, VROverlayFlags_IgnoreTextureAlpha, next.ignoreTextureAlpha));
+  APPLY(next.sideBySide != last->sideBySide, SetOverlayFlag(handle, VROverlayFlags_SideBySide_Parallel, next.sideBySide));
+  APPLY(next.colorSpace != last->colorSpace, SetOverlayTextureColorSpace(handle, next.colorSpace));
+  APPLY(memcmp(next.color, last->color, 3 * sizeof(float)),
+    SetOverlayColor(handle, next.color[0], next.color[1], next.color[2]));
+  APPLY(next.color[3] != last->color[3], SetOverlayAlpha(handle, next.color[3]));
+  APPLY(next.order != last->order, SetOverlaySortOrder(handle, next.order));
+  APPLY(next.width != last->width, SetOverlayWidthInMeters(handle, next.width));
+  APPLY(memcmp(&next.bounds, &last->bounds, sizeof(next.bounds)), SetOverlayTextureBounds(handle, &next.bounds));
+  APPLY(next.aspect != last->aspect, SetOverlayTexelAspect(handle, next.aspect));
+  APPLY(next.curvature != last->curvature, SetOverlayCurvature(handle, next.curvature));
+  if (next.transform == OPENVR_PANEL_ABSOLUTE) {
+    APPLY(moved, SetOverlayTransformAbsolute(handle, next.origin, &next.pose));
   } else {
-    APPLY(SetOverlayTransformTrackedDeviceRelative(handle, config->device, &pose));
+    APPLY(moved, SetOverlayTransformTrackedDeviceRelative(handle, next.device, &next.pose));
   }
 #undef APPLY
+  panel->applied = next;
   panel->configured = true;
   return result(OPENVR_PANEL_OK, NULL, 0);
 }
 
 OpenVRPanelResult lovrOpenVRPanelShow(OpenVRPanel* panel) {
   if (!panel || !panel->api || !panel->handle || !panel->configured) return result(OPENVR_PANEL_INVALID, "show", 0);
-  return runtimeResult("ShowOverlay", panel->api->ShowOverlay(panel->handle));
+  if (panel->visible) return result(OPENVR_PANEL_OK, NULL, 0);
+  OpenVRPanelResult status = runtimeResult("ShowOverlay", panel->api->ShowOverlay(panel->handle));
+  panel->visible = status.status == OPENVR_PANEL_OK;
+  return status;
 }
 
 OpenVRPanelResult lovrOpenVRPanelHide(OpenVRPanel* panel) {
   if (!panel) return result(OPENVR_PANEL_INVALID, "hide", 0);
   if (!panel->handle) return result(OPENVR_PANEL_OK, NULL, 0);
+  panel->visible = false;
   return runtimeResult("HideOverlay", panel->api->HideOverlay(panel->handle));
 }
 
