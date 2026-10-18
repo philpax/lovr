@@ -34,7 +34,8 @@
 [submodule "deps/luau"]
 	path = deps/luau
 	url = https://github.com/philpax/luau.git
-	branch = lunette/luau-bump
+	branch = lunette
+	update = rebase
 [submodule "deps/phonon"]
 	path = deps/phonon
 	url = https://github.com/bjornbytes/steam-audio

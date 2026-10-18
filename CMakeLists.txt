@@ -28,6 +28,7 @@ option(LOVR_USE_LUAJIT "Use LuaJIT instead of Lua" ON)
 option(LOVR_USE_LUAU "Use Luau instead of Lua" OFF)
 option(LOVR_EXPORT_LUA_SYMBOLS "Export the Lua C API so an external consumer can link it" OFF)
 option(LOVR_LUAU_ANALYSIS "Link Luau's type checker into the library" OFF)
+option(LOVR_LUAU_CODEGEN "Link Luau's native code generator into the library" OFF)
 option(LOVR_USE_GLSLANG "Use glslang to compile GLSL shaders" ON)
 option(LOVR_USE_VULKAN "Use the Vulkan renderer" ON)
 option(LOVR_USE_WEBGPU "Use the WebGPU renderer" OFF)
@@ -131,7 +132,7 @@ if(LOVR_USE_LUAU)
   set(LUAU_EXTERN_C ON CACHE BOOL "")
   set(LUAU_VECTOR_FOUR_WIDE ON CACHE BOOL "")
   add_subdirectory(deps/luau luau)
-  foreach(target Luau.VM Luau.Compiler)
+  foreach(target Luau.VM Luau.Compiler Luau.CodeGen)
     get_target_property(defs ${target} INTERFACE_COMPILE_DEFINITIONS)
     list(FILTER defs EXCLUDE REGEX [[LUA.*_API]])
     set_target_properties(${target} PROPERTIES INTERFACE_COMPILE_DEFINITIONS "${defs}")
@@ -149,11 +150,12 @@ if(LOVR_USE_LUAU)
   else()
     set_target_properties(Luau.Analysis PROPERTIES EXCLUDE_FROM_ALL 1)
   endif()
-  set_target_properties(
-    Luau.CLI.lib
-    Luau.CodeGen
-    PROPERTIES EXCLUDE_FROM_ALL 1
-  )
+  if(LOVR_LUAU_CODEGEN)
+    list(APPEND LOVR_LUA Luau.CodeGen)
+  else()
+    set_target_properties(Luau.CodeGen PROPERTIES EXCLUDE_FROM_ALL 1)
+  endif()
+  set_target_properties(Luau.CLI.lib PROPERTIES EXCLUDE_FROM_ALL 1)
   set_target_properties(${LOVR_LUA} PROPERTIES POSITION_INDEPENDENT_CODE 1)
 elseif(LOVR_USE_LUAJIT AND NOT EMSCRIPTEN)
   if(LOVR_SYSTEM_LUA)
@@ -534,6 +536,12 @@ if(LOVR_USE_LUAU AND LOVR_EXPORT_LUA_SYMBOLS)
   )
 endif()
 
+set(LOVR_LUAU_WHOLE_ARCHIVES)
+if(LOVR_USE_LUAU AND LOVR_LUAU_CODEGEN AND LOVR_EXPORT_LUA_SYMBOLS)
+  # Keep the complete CodeGen C API available to external Lua consumers.
+  list(APPEND LOVR_LUAU_WHOLE_ARCHIVES "$<TARGET_FILE:Luau.CodeGen>")
+endif()
+
 if(LOVR_USE_LUAU AND LOVR_LUAU_ANALYSIS)
   # Nothing in LOVR references the type checker, so a plain archive reference
   # pulls in none of it and the library exports nothing. `--undefined=` takes
@@ -544,9 +552,12 @@ if(LOVR_USE_LUAU AND LOVR_LUAU_ANALYSIS)
   # copies of Luau unify their FFlag statics as GNU unique symbols, which makes
   # a flag register onto `FValue<bool>::list` twice and its `next` point at
   # itself, and static initialisation then spins on the first traversal.
-  target_link_options(lovr PRIVATE
-    "-Wl,--whole-archive" "$<TARGET_FILE:Luau.Analysis>" "-Wl,--no-whole-archive"
-  )
+  list(APPEND LOVR_LUAU_WHOLE_ARCHIVES "$<TARGET_FILE:Luau.Analysis>")
+endif()
+
+if(LOVR_LUAU_WHOLE_ARCHIVES)
+  # One group keeps CMake option de-duplication from stripping repeated archive delimiters.
+  target_link_options(lovr PRIVATE "-Wl,--whole-archive" ${LOVR_LUAU_WHOLE_ARCHIVES} "-Wl,--no-whole-archive")
 endif()
 
 if(LOVR_SANITIZE)
@@ -573,6 +584,9 @@ endif()
 
 if(LOVR_USE_LUAU)
   target_compile_definitions(lovr PRIVATE LOVR_USE_LUAU)
+  if(LOVR_LUAU_CODEGEN)
+    target_compile_definitions(lovr PRIVATE LOVR_LUAU_CODEGEN)
+  endif()
 endif()
 
 if(LOVR_ENABLE_AUDIO)

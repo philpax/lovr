@@ -5,6 +5,9 @@
 #include "util.h"
 #ifdef LOVR_USE_LUAU
 #include <luacode.h>
+#ifdef LOVR_LUAU_CODEGEN
+#include <luacodegen.h>
+#endif
 #endif
 #include "lib/luax/lutf8lib.h"
 #include <stdlib.h>
@@ -326,12 +329,83 @@ int luax_resume(lua_State* T, int n) {
 #endif
 }
 
+#ifdef LOVR_USE_LUAU
+static const char* luauOptimizationKey = "lovr.luau.optimization";
+static const char* luauNativeKey = "lovr.luau.native";
+#ifdef LOVR_LUAU_CODEGEN
+static const char* luauCodegenKey = "lovr.luau.codegen";
+#endif
+
+static bool luax_getluauflag(lua_State* L, const char* key) {
+  lua_pushstring(L, key);
+  lua_rawget(L, LUA_REGISTRYINDEX);
+  bool value = lua_toboolean(L, -1);
+  lua_pop(L, 1);
+  return value;
+}
+#endif
+
+bool luax_luaucodegensupported(void) {
+#if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
+  return luau_codegen_supported() != 0;
+#else
+  return false;
+#endif
+}
+
+bool luax_setluauoptions(lua_State* L, int optimizationLevel, bool native) {
+#ifdef LOVR_USE_LUAU
+  if (optimizationLevel != 1 && optimizationLevel != 2) return false;
+  if (native && !luax_luaucodegensupported()) return false;
+
+#ifdef LOVR_LUAU_CODEGEN
+  if (native && !luax_getluauflag(L, luauCodegenKey)) {
+    // Allocate the registry entry before creating the VM-owned CodeGen context.
+    lua_pushstring(L, luauCodegenKey);
+    lua_pushboolean(L, false);
+    lua_rawset(L, LUA_REGISTRYINDEX);
+    luau_codegen_create(L);
+    lua_pushstring(L, luauCodegenKey);
+    lua_pushboolean(L, true);
+    lua_rawset(L, LUA_REGISTRYINDEX);
+  }
+#endif
+
+  lua_pushstring(L, luauOptimizationKey);
+  lua_pushinteger(L, optimizationLevel);
+  lua_rawset(L, LUA_REGISTRYINDEX);
+  lua_pushstring(L, luauNativeKey);
+  lua_pushboolean(L, native);
+  lua_rawset(L, LUA_REGISTRYINDEX);
+  return true;
+#else
+  return false;
+#endif
+}
+
+void luax_compilefunction(lua_State* L, int index) {
+#if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
+  if (luax_getluauflag(L, luauNativeKey) && lua_isfunction(L, index) && !lua_iscfunction(L, index)) {
+    luau_codegen_compile(L, index);
+  }
+#endif
+}
+
 int luax_loadbufferx(lua_State* L, const char* buffer, size_t size, const char* name, const char* mode) {
 #ifdef LOVR_USE_LUAU
+  lua_pushstring(L, luauOptimizationKey);
+  lua_rawget(L, LUA_REGISTRYINDEX);
+  int optimizationLevel = lua_isnumber(L, -1) ? lua_tointeger(L, -1) : 1;
+  lua_pop(L, 1);
+  lua_CompileOptions options = { 0 };
+  options.optimizationLevel = optimizationLevel;
+  options.debugLevel = 1;
+  options.typeInfoLevel = luax_getluauflag(L, luauNativeKey) ? 1 : 0;
   size_t bytecodeSize = 0;
-  char* bytecode = luau_compile(buffer, size, NULL, &bytecodeSize);
+  char* bytecode = luau_compile(buffer, size, &options, &bytecodeSize);
   int result = luau_load(L, name, bytecode, bytecodeSize, 0);
   free(bytecode);
+  if (!result) luax_compilefunction(L, -1);
   return result ? LUA_ERRSYNTAX : LUA_OK;
 #elif LUA_VERSION_NUM >= 502
   return luaL_loadbufferx(L, buffer, size, name, mode);
