@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <lua.h>
 #include <lauxlib.h>
+#include "luaumetrics.h"
 
 #pragma once
 
@@ -131,6 +132,12 @@ void luax_registerloader(lua_State* L, int (*loader)(lua_State* L), int index, i
 int luax_resume(lua_State* T, int n);
 bool luax_luaucodegensupported(void);
 bool luax_setluauoptions(lua_State* L, int optimizationLevel, bool native);
+// Scope changes affect future compilation only; existing native functions remain bound.
+bool luax_setluauoptions_scoped(lua_State* L, int optimizationLevel, int nativeScope);
+// Enable before the first successful options configuration.  Repeated enable calls are idempotent.
+bool luax_enableluaumetrics(lua_State* L);
+// Returns false when metrics are disabled or out is NULL; leaves out unchanged on failure.
+bool luax_getluaumetrics(lua_State* L, LuauMetrics* out);
 void luax_compilefunction(lua_State* L, int index);
 int luax_loadbufferx(lua_State* L, const char* buffer, size_t size, const char* name, const char* mode);
 void luax_vthrow(void* L, const char* format, va_list args);

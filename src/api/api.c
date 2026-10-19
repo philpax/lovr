@@ -4,7 +4,11 @@
 #include "core/maf.h"
 #include "util.h"
 #ifdef LOVR_USE_LUAU
+#include "codegen.h"
 #include <luacode.h>
+#if defined(__linux__)
+#include <time.h>
+#endif
 #ifdef LOVR_LUAU_CODEGEN
 #include <luacodegen.h>
 #endif
@@ -332,16 +336,77 @@ int luax_resume(lua_State* T, int n) {
 #ifdef LOVR_USE_LUAU
 static const char* luauOptimizationKey = "lovr.luau.optimization";
 static const char* luauNativeKey = "lovr.luau.native";
+static const char* luauNativeScopeKey = "lovr.luau.nativeScope";
+static const char* luauMetricsKey = "lovr.luau.metrics";
 #ifdef LOVR_LUAU_CODEGEN
 static const char* luauCodegenKey = "lovr.luau.codegen";
-#endif
 
-static bool luax_getluauflag(lua_State* L, const char* key) {
-  lua_pushstring(L, key);
+static bool luax_hasluaucodegen(lua_State* L) {
+  lua_pushstring(L, luauCodegenKey);
   lua_rawget(L, LUA_REGISTRYINDEX);
   bool value = lua_toboolean(L, -1);
   lua_pop(L, 1);
   return value;
+}
+#endif
+
+static int luax_getluauinteger(lua_State* L, const char* key, int fallback) {
+  lua_pushstring(L, key);
+  lua_rawget(L, LUA_REGISTRYINDEX);
+  int value = lua_isnumber(L, -1) ? lua_tointeger(L, -1) : fallback;
+  lua_pop(L, 1);
+  return value;
+}
+
+static LuauMetricsState* luax_getluaumetricsstate(lua_State* L) {
+  lua_pushstring(L, luauMetricsKey);
+  lua_rawget(L, LUA_REGISTRYINDEX);
+  LuauMetricsState** holder = lua_touserdata(L, -1);
+  LuauMetricsState* state = holder ? *holder : NULL;
+  lua_pop(L, 1);
+  return state;
+}
+
+void luax_releaseluaumetrics(LuauMetricsState* state) {
+  if (--state->references == 0) free(state);
+}
+
+static void luax_destroyluaumetrics(lua_State* L, void* userdata) {
+  LuauMetricsState** holder = userdata;
+  if (*holder) {
+    // Luau close_state frees userdata before ecb.close destroys the CodeGen allocator.
+    // Each arena reservation retains the heap state until its final freePages callback.
+    luax_releaseluaumetrics(*holder);
+    *holder = NULL;
+  }
+}
+
+LuauMetricsClock luax_luaumetricsclock(LuauMetrics* metrics) {
+  LuauMetricsClock clock = { 0 };
+#if defined(__linux__)
+  struct timespec time;
+  if (metrics->elapsedClockAvailable) {
+    if (clock_gettime(CLOCK_MONOTONIC, &time) == 0) {
+      clock.elapsedNs = (uint64_t) time.tv_sec * 1000000000 + time.tv_nsec;
+    } else {
+      metrics->elapsedClockAvailable = 0;
+    }
+  }
+  if (metrics->threadCpuClockAvailable) {
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time) == 0) {
+      clock.cpuNs = (uint64_t) time.tv_sec * 1000000000 + time.tv_nsec;
+    } else {
+      metrics->threadCpuClockAvailable = 0;
+    }
+  }
+#endif
+  return clock;
+}
+
+void luax_luaumetricselapsed(LuauMetrics* metrics, LuauMetricsClock start, uint64_t* elapsedNs, uint64_t* cpuNs) {
+  LuauMetricsClock end = luax_luaumetricsclock(metrics);
+  if (metrics->elapsedClockAvailable) *elapsedNs += end.elapsedNs - start.elapsedNs;
+  if (metrics->threadCpuClockAvailable) *cpuNs += end.cpuNs - start.cpuNs;
 }
 #endif
 
@@ -354,17 +419,22 @@ bool luax_luaucodegensupported(void) {
 }
 
 bool luax_setluauoptions(lua_State* L, int optimizationLevel, bool native) {
+  return luax_setluauoptions_scoped(L, optimizationLevel, native ? LUAU_NATIVE_ALL : LUAU_NATIVE_NONE);
+}
+
+bool luax_setluauoptions_scoped(lua_State* L, int optimizationLevel, int nativeScope) {
 #ifdef LOVR_USE_LUAU
   if (optimizationLevel != 1 && optimizationLevel != 2) return false;
-  if (native && !luax_luaucodegensupported()) return false;
+  if (nativeScope < LUAU_NATIVE_NONE || nativeScope > LUAU_NATIVE_MARKED) return false;
+  if (nativeScope != LUAU_NATIVE_NONE && !luax_luaucodegensupported()) return false;
 
 #ifdef LOVR_LUAU_CODEGEN
-  if (native && !luax_getluauflag(L, luauCodegenKey)) {
+  if (nativeScope != LUAU_NATIVE_NONE && !luax_hasluaucodegen(L)) {
     // Allocate the registry entry before creating the VM-owned CodeGen context.
     lua_pushstring(L, luauCodegenKey);
     lua_pushboolean(L, false);
     lua_rawset(L, LUA_REGISTRYINDEX);
-    luau_codegen_create(L);
+    if (!luax_codegencreate(L, luax_getluaumetricsstate(L))) return false;
     lua_pushstring(L, luauCodegenKey);
     lua_pushboolean(L, true);
     lua_rawset(L, LUA_REGISTRYINDEX);
@@ -375,8 +445,55 @@ bool luax_setluauoptions(lua_State* L, int optimizationLevel, bool native) {
   lua_pushinteger(L, optimizationLevel);
   lua_rawset(L, LUA_REGISTRYINDEX);
   lua_pushstring(L, luauNativeKey);
-  lua_pushboolean(L, native);
+  lua_pushboolean(L, nativeScope != LUAU_NATIVE_NONE);
   lua_rawset(L, LUA_REGISTRYINDEX);
+  lua_pushstring(L, luauNativeScopeKey);
+  lua_pushinteger(L, nativeScope);
+  lua_rawset(L, LUA_REGISTRYINDEX);
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool luax_enableluaumetrics(lua_State* L) {
+#ifdef LOVR_USE_LUAU
+  if (luax_getluaumetricsstate(L)) return true;
+  if (luax_getluauinteger(L, luauOptimizationKey, 0)) return false;
+#ifdef LOVR_LUAU_CODEGEN
+  if (luax_hasluaucodegen(L) || luax_codegenhascontext(L)) return false;
+#endif
+
+  lua_pushstring(L, luauMetricsKey);
+  LuauMetricsState** holder = lua_newuserdatadtor(L, sizeof(*holder), luax_destroyluaumetrics);
+  *holder = NULL;
+  LuauMetricsState* state = calloc(1, sizeof(*state));
+  if (!state) {
+    lua_pop(L, 2);
+    return false;
+  }
+  state->references = 1;
+  state->metrics.lastNativeCompileResult = -1;
+  state->metrics.nativeCodegenAvailable = luax_luaucodegensupported();
+#if defined(__linux__)
+  state->metrics.elapsedClockAvailable = 1;
+  state->metrics.threadCpuClockAvailable = 1;
+#endif
+  luax_luaumetricsclock(&state->metrics);
+  *holder = state;
+  lua_rawset(L, LUA_REGISTRYINDEX);
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool luax_getluaumetrics(lua_State* L, LuauMetrics* out) {
+#ifdef LOVR_USE_LUAU
+  if (!out) return false;
+  LuauMetricsState* state = luax_getluaumetricsstate(L);
+  if (!state) return false;
+  *out = state->metrics;
   return true;
 #else
   return false;
@@ -385,25 +502,39 @@ bool luax_setluauoptions(lua_State* L, int optimizationLevel, bool native) {
 
 void luax_compilefunction(lua_State* L, int index) {
 #if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
-  if (luax_getluauflag(L, luauNativeKey) && lua_isfunction(L, index) && !lua_iscfunction(L, index)) {
-    luau_codegen_compile(L, index);
+  int nativeScope = luax_getluauinteger(L, luauNativeScopeKey, LUAU_NATIVE_NONE);
+  if (nativeScope != LUAU_NATIVE_NONE && lua_isfunction(L, index) && !lua_iscfunction(L, index)) {
+    luax_codegencompile(L, index, nativeScope, luax_getluaumetricsstate(L));
   }
 #endif
 }
 
 int luax_loadbufferx(lua_State* L, const char* buffer, size_t size, const char* name, const char* mode) {
 #ifdef LOVR_USE_LUAU
-  lua_pushstring(L, luauOptimizationKey);
-  lua_rawget(L, LUA_REGISTRYINDEX);
-  int optimizationLevel = lua_isnumber(L, -1) ? lua_tointeger(L, -1) : 1;
-  lua_pop(L, 1);
   lua_CompileOptions options = { 0 };
-  options.optimizationLevel = optimizationLevel;
+  options.optimizationLevel = luax_getluauinteger(L, luauOptimizationKey, 1);
   options.debugLevel = 1;
-  options.typeInfoLevel = luax_getluauflag(L, luauNativeKey) ? 1 : 0;
+  options.typeInfoLevel = luax_getluauinteger(L, luauNativeScopeKey, LUAU_NATIVE_NONE) != LUAU_NATIVE_NONE ? 1 : 0;
+  LuauMetricsState* state = luax_getluaumetricsstate(L);
+  LuauMetricsClock start = { 0 };
+  if (state) start = luax_luaumetricsclock(&state->metrics);
   size_t bytecodeSize = 0;
   char* bytecode = luau_compile(buffer, size, &options, &bytecodeSize);
+  if (state) {
+    LuauMetrics* metrics = &state->metrics;
+    luax_luaumetricselapsed(metrics, start, &metrics->bytecodeCompileElapsedNs, &metrics->bytecodeCompileCpuNs);
+    metrics->bytecodeCompileCalls++;
+    metrics->bytecodeCompileInputBytes += size;
+    metrics->bytecodeCompileOutputBytes += bytecodeSize;
+    metrics->bytecodeLoadCalls++;
+    metrics->bytecodeLoadInputBytes += bytecodeSize;
+    start = luax_luaumetricsclock(metrics);
+  }
   int result = luau_load(L, name, bytecode, bytecodeSize, 0);
+  if (state) {
+    LuauMetrics* metrics = &state->metrics;
+    luax_luaumetricselapsed(metrics, start, &metrics->bytecodeLoadElapsedNs, &metrics->bytecodeLoadCpuNs);
+  }
   free(bytecode);
   if (!result) luax_compilefunction(L, -1);
   return result ? LUA_ERRSYNTAX : LUA_OK;
