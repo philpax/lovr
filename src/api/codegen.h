@@ -27,6 +27,9 @@ void luax_luaumetricselapsed(LuauMetrics* metrics, LuauMetricsClock start, uint6
 bool luax_codegenhascontext(lua_State* L);
 bool luax_codegencreate(lua_State* L, LuauMetricsState* state);
 void luax_codegencompile(lua_State* L, int index, int nativeScope, LuauMetricsState* state);
+bool luax_codegensettierup(lua_State* L, int threshold, int queueCapacity);
+int luax_codegenhotqueuesize(lua_State* L);
+int luax_codegenpromote(lua_State* L, size_t instructionBudget, LuauMetricsState* state);
 #endif
 
 #ifdef __cplusplus

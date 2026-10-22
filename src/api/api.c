@@ -338,6 +338,11 @@ static const char* luauOptimizationKey = "lovr.luau.optimization";
 static const char* luauNativeKey = "lovr.luau.native";
 static const char* luauNativeScopeKey = "lovr.luau.nativeScope";
 static const char* luauMetricsKey = "lovr.luau.metrics";
+static const char* luauHotThresholdKey = "lovr.luau.hotThreshold";
+static const char* luauHotQueueCapacityKey = "lovr.luau.hotQueueCapacity";
+// Used until the host sets tier-up parameters; the host owns the policy.
+static const int luauDefaultHotThreshold = 1000;
+static const int luauDefaultHotQueueCapacity = 256;
 #ifdef LOVR_LUAU_CODEGEN
 static const char* luauCodegenKey = "lovr.luau.codegen";
 
@@ -347,6 +352,17 @@ static bool luax_hasluaucodegen(lua_State* L) {
   bool value = lua_toboolean(L, -1);
   lua_pop(L, 1);
   return value;
+}
+
+static int luax_getluauinteger(lua_State* L, const char* key, int fallback);
+
+// Only the tiered scope counts newly loaded functions; the queue keeps its capacity so queued entries stay valid across scope changes.
+static void luax_applyluautierup(lua_State* L) {
+  if (!luax_hasluaucodegen(L)) return;
+  bool tiered = luax_getluauinteger(L, luauNativeScopeKey, LUAU_NATIVE_NONE) == LUAU_NATIVE_TIERED;
+  int threshold = luax_getluauinteger(L, luauHotThresholdKey, luauDefaultHotThreshold);
+  int queueCapacity = luax_getluauinteger(L, luauHotQueueCapacityKey, luauDefaultHotQueueCapacity);
+  luax_codegensettierup(L, tiered ? threshold : 0, queueCapacity);
 }
 #endif
 
@@ -425,7 +441,7 @@ bool luax_setluauoptions(lua_State* L, int optimizationLevel, bool native) {
 bool luax_setluauoptions_scoped(lua_State* L, int optimizationLevel, int nativeScope) {
 #ifdef LOVR_USE_LUAU
   if (optimizationLevel != 1 && optimizationLevel != 2) return false;
-  if (nativeScope < LUAU_NATIVE_NONE || nativeScope > LUAU_NATIVE_MARKED) return false;
+  if (nativeScope < LUAU_NATIVE_NONE || nativeScope > LUAU_NATIVE_TIERED) return false;
   if (nativeScope != LUAU_NATIVE_NONE && !luax_luaucodegensupported()) return false;
 
 #ifdef LOVR_LUAU_CODEGEN
@@ -450,9 +466,45 @@ bool luax_setluauoptions_scoped(lua_State* L, int optimizationLevel, int nativeS
   lua_pushstring(L, luauNativeScopeKey);
   lua_pushinteger(L, nativeScope);
   lua_rawset(L, LUA_REGISTRYINDEX);
+#ifdef LOVR_LUAU_CODEGEN
+  luax_applyluautierup(L);
+#endif
   return true;
 #else
   return false;
+#endif
+}
+
+bool luax_setluautierup(lua_State* L, int threshold, int queueCapacity) {
+#if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
+  if (threshold < 0 || queueCapacity < 0) return false;
+  lua_pushstring(L, luauHotThresholdKey);
+  lua_pushinteger(L, threshold);
+  lua_rawset(L, LUA_REGISTRYINDEX);
+  lua_pushstring(L, luauHotQueueCapacityKey);
+  lua_pushinteger(L, queueCapacity);
+  lua_rawset(L, LUA_REGISTRYINDEX);
+  luax_applyluautierup(L);
+  return true;
+#else
+  return false;
+#endif
+}
+
+int luax_promoteluau(lua_State* L, size_t instructionBudget) {
+#if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
+  if (luax_getluauinteger(L, luauNativeScopeKey, LUAU_NATIVE_NONE) != LUAU_NATIVE_TIERED || !luax_hasluaucodegen(L)) return -1;
+  return luax_codegenpromote(L, instructionBudget, luax_getluaumetricsstate(L));
+#else
+  return -1;
+#endif
+}
+
+int luax_getluauhotqueuesize(lua_State* L) {
+#if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
+  return luax_hasluaucodegen(L) ? luax_codegenhotqueuesize(L) : 0;
+#else
+  return 0;
 #endif
 }
 

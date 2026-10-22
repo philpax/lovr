@@ -6,7 +6,9 @@
 typedef enum {
   LUAU_NATIVE_NONE = 0,
   LUAU_NATIVE_ALL = 1,
-  LUAU_NATIVE_MARKED = 2
+  LUAU_NATIVE_MARKED = 2,
+  // Marked modules compile at load; other functions compile when the host promotes them after they become hot.
+  LUAU_NATIVE_TIERED = 3
 } LuauNativeScope;
 
 // Counters are cumulative per VM; snapshots can be subtracted without resetting live gauges.
@@ -38,6 +40,11 @@ typedef struct {
   uint64_t nativeCompileFailures;
   uint64_t nativeCompileElapsedNs;
   uint64_t nativeCompileCpuNs;
+  // Hot promotion is a subset of the native totals above: calls that compiled queued functions, the functions they bound, and their time.
+  uint64_t hotPromotionCalls;
+  uint64_t hotFunctionsPromoted;
+  uint64_t hotPromotionElapsedNs;
+  uint64_t hotPromotionCpuNs;
   // CodeGen callbacks report whole arena block reservations, not live executable code.
   uint64_t codegenReservedBytes;
   uint64_t codegenPeakReservedBytes;

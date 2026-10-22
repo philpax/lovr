@@ -136,6 +136,13 @@ bool luax_setluauoptions(lua_State* L, int optimizationLevel, bool native);
 bool luax_setluauoptions_scoped(lua_State* L, int optimizationLevel, int nativeScope);
 // Enable before the first successful options configuration.  Repeated enable calls are idempotent.
 bool luax_enableluaumetrics(lua_State* L);
+// Sets the tiered scope's hot threshold and queue capacity; other scopes stop counting newly loaded functions.
+// Functions loaded afterwards count interpreted entries and loop iterations, then wait in the queue for promotion.
+bool luax_setluautierup(lua_State* L, int threshold, int queueCapacity);
+// Compiles queued hot functions oldest first until the next would exceed the bytecode instruction budget; at least one is compiled.
+// Returns the number of functions bound to native code, or -1 outside the tiered scope.
+int luax_promoteluau(lua_State* L, size_t instructionBudget);
+int luax_getluauhotqueuesize(lua_State* L);
 // Returns false when metrics are disabled or out is NULL; leaves out unchanged on failure.
 bool luax_getluaumetrics(lua_State* L, LuauMetrics* out);
 void luax_compilefunction(lua_State* L, int index);
