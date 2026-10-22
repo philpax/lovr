@@ -472,6 +472,7 @@ if(LOVR_ENABLE_OPENVR)
     src/modules/headset/openvr_frame.c
     src/modules/headset/openvr_events.c
     src/modules/headset/openvr_haptics.c
+    src/modules/headset/openvr_foveation.c
     src/modules/headset/openvr_input.c
     src/modules/headset/openvr_assets.c
     src/modules/headset/headset_openvr.c

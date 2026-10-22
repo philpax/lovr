@@ -727,7 +727,8 @@ typedef enum {
   GPU_PHASE_COPY = (1 << 9),
   GPU_PHASE_CLEAR = (1 << 10),
   GPU_PHASE_BLIT = (1 << 11),
-  GPU_PHASE_TREE_BUILD = (1 << 12)
+  GPU_PHASE_TREE_BUILD = (1 << 12),
+  GPU_PHASE_FRAGMENT_DENSITY = (1 << 13)
 } gpu_phase;
 
 typedef enum {
@@ -747,6 +748,7 @@ typedef enum {
   GPU_CACHE_TREE_INPUT  = (1 << 13),
   GPU_CACHE_TREE_READ  = (1 << 14),
   GPU_CACHE_TREE_WRITE  = (1 << 15),
+  GPU_CACHE_FRAGMENT_DENSITY = (1 << 16),
   GPU_CACHE_WRITE_MASK =
     GPU_CACHE_STORAGE_WRITE |
     GPU_CACHE_DEPTH_WRITE |
@@ -867,6 +869,7 @@ typedef struct {
   uint32_t textureSizeCube;
   uint32_t textureLayers;
   uint32_t renderSize[3];
+  uint32_t foveationTexelSize[2];
   uint32_t uniformBuffersPerStage;
   uint32_t storageBuffersPerStage;
   uint32_t sampledTexturesPerStage;

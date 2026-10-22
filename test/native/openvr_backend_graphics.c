@@ -9,6 +9,8 @@
 #define LOVR_LAYER_GRAPHICS_HARNESS
 #define main graphicsSessionMain
 #define gpu_copy_textures unused_copy_textures
+#define gpu_copy_buffer_texture unused_copy_buffer_texture
+#define gpu_buffer_flush unused_buffer_flush
 #define gpu_sync unused_sync
 #define gpu_stream_begin unused_stream_begin
 #define gpu_stream_end unused_stream_end
@@ -17,6 +19,8 @@
 #include "graphics_session.c"
 #undef main
 #undef gpu_copy_textures
+#undef gpu_copy_buffer_texture
+#undef gpu_buffer_flush
 #undef gpu_sync
 #undef gpu_stream_begin
 #undef gpu_stream_end
@@ -120,15 +124,31 @@ static HmdMatrix34_t OPENVR_FNTABLE_CALLTYPE runtimeEye(EVREye eye) {
 static void OPENVR_FNTABLE_CALLTYPE runtimeFrustum(EVREye eye, float* left, float* right, float* top, float* bottom) {
   *left = eye ? -.9f : -1.1f; *right = eye ? 1.2f : .8f; *top = -1.3f; *bottom = .7f;
 }
+static Compositor_FrameTiming compositorFrame;
+static bool OPENVR_FNTABLE_CALLTYPE runtimeFrameTiming(Compositor_FrameTiming* timing, uint32_t framesAgo) {
+  if (framesAgo != 0 || timing->m_nSize != sizeof(*timing)) abort();
+  *timing = compositorFrame;
+  return true;
+}
+static struct VR_IVRCompositor_FnTable runtimeCompositor = { .GetFrameTiming = runtimeFrameTiming };
+static unsigned gazeQueries;
+static bool OPENVR_FNTABLE_CALLTYPE runtimeGaze(HmdVector2_t* left, HmdVector2_t* right) {
+  gazeQueries++;
+  *left = (HmdVector2_t) { { -.5f, .25f } };
+  *right = (HmdVector2_t) { { .5f, .25f } };
+  return true;
+}
 static struct VR_IVRSystem_FnTable runtimeSystem = { .GetFloatTrackedDeviceProperty = runtimeProperty,
   .GetTimeSinceLastVsync = runtimeVsync, .GetRecommendedRenderTargetSize = runtimeDimensions,
   .GetDeviceToAbsoluteTrackingPose = runtimeTracking, .GetEyeToHeadTransform = runtimeEye, .GetProjectionRaw = runtimeFrustum,
+  .GetEyeTrackedFoveationCenter = runtimeGaze,
   .PollNextEvent = graphicsPoll, .AcknowledgeQuit_Exiting = backendAck,
   .IsInputAvailable = graphicsInputAvailable, .ShouldApplicationPause = graphicsPause };
 
 static unsigned sceneCopies, sceneSubmissions, panelCopies, panelSubmissions;
 static uint32_t sceneCopiedEyes[2];
 static gpu_texture* sceneCopiedOutputs[2];
+static uintptr_t sceneHanded[2];
 static bool traceScene;
 
 void gpu_copy_textures(gpu_stream* stream, gpu_texture* src, gpu_texture* dst, uint32_t source[4], uint32_t target[4], uint32_t extent[3]) {
@@ -137,11 +157,23 @@ void gpu_copy_textures(gpu_stream* stream, gpu_texture* src, gpu_texture* dst, u
     if (source[2] || target[2] || extent[0] != 64 || extent[1] != 32 || extent[2] != 1) abort();
     panelCopies++; return;
   }
-  if (!traceScene || sceneCopies >= 2 || src != vrState.scene.texture->gpu || dst != vrState.scene.output[source[2]]->gpu ||
+  if (!traceScene || sceneCopies >= 2 || src != vrState.scene.texture->gpu || dst != vrState.scene.output[vrState.scene.outputSlot][source[2]]->gpu ||
       source[0] || source[1] || source[3] || target[0] || target[1] || target[2] || target[3] ||
       extent[0] != sceneWidth || extent[1] != sceneHeight || extent[2] != 1) abort();
   sceneCopiedEyes[sceneCopies] = source[2];
   sceneCopiedOutputs[sceneCopies++] = dst;
+}
+// Only the foveation map writes through an upload buffer, which submission flushes.
+void gpu_buffer_flush(gpu_buffer* buffer, uint32_t offset, uint32_t extent) { (void) buffer; (void) offset; (void) extent; }
+static unsigned foveationUploads;
+static uint32_t foveationEyes[2];
+void gpu_copy_buffer_texture(gpu_stream* stream, gpu_buffer* src, gpu_texture* dst, uint32_t srcOffset, uint32_t dstOffset[4], uint32_t extent[3], uint32_t texelsPerRow) {
+  (void) stream; (void) src; (void) srcOffset; (void) texelsPerRow;
+  Texture** maps = vrState.scene.foveation;
+  uint32_t eye = maps[1] && dst == maps[1]->gpu;
+  if (!maps[eye] || dst != maps[eye]->gpu || foveationUploads >= 2 || dstOffset[0] || dstOffset[1] || dstOffset[2] ||
+      dstOffset[3] || extent[0] != maps[eye]->info.width || extent[1] != maps[eye]->info.height || extent[2] != 1) abort();
+  foveationEyes[foveationUploads++] = eye;
 }
 void gpu_sync(gpu_stream* stream, gpu_barrier* barriers, uint32_t count) { (void) stream; (void) barriers; (void) count; }
 gpu_stream* gpu_stream_begin(const char* label) { (void) label; return (gpu_stream*) 1; }
@@ -241,10 +273,11 @@ static EVROverlayError OPENVR_FNTABLE_CALLTYPE runtimeTexture(VROverlayHandle_t 
   if (unlocked) mtx_unlock(&state.lock);
   if (unlocked || !externalHandoff || eye >= 2 || handle != 81 + eye ||
       texture->eType != ETextureType_TextureType_Vulkan || texture->eColorSpace != EColorSpace_ColorSpace_Gamma ||
-      image->m_nImage != (uintptr_t) vrState.scene.output[eye]->gpu || image->m_nWidth != sceneWidth || image->m_nHeight != sceneHeight ||
+      image->m_nImage != (uintptr_t) vrState.scene.output[vrState.scene.outputSlot][eye]->gpu || image->m_nWidth != sceneWidth || image->m_nHeight != sceneHeight ||
       image->m_nFormat != VK_FORMAT_R8G8B8A8_SRGB || image->m_nSampleCount != 1 ||
       (uintptr_t) image->m_pInstance != 1 || (uintptr_t) image->m_pPhysicalDevice != 2 ||
       (uintptr_t) image->m_pDevice != 3 || (uintptr_t) image->m_pQueue != 4 || image->m_nQueueFamilyIndex != 5) abort();
+  sceneHanded[eye] = image->m_nImage;
   return failSceneHandoff ? EVROverlayError_VROverlayError_RequestFailed : EVROverlayError_VROverlayError_None;
 }
 static struct VR_IVROverlay_FnTable runtimeAPI = {
@@ -483,14 +516,19 @@ static bool sceneCanvas(void) {
   Pass* pass;
   CHECK(scenePass(&pass) && pass && pass->views == 2 && pass->canvas.samples == 4);
   CHECK(pass->tempDepth && pass->tempColor[0] && pass->canvas.depthFormat == FORMAT_D24S8);
-  CHECK(pass->target.color[0].resolve == vrState.scene.texture->renderView);
+  // Each eye renders straight into the image that SteamVR receives.
+  Texture** outputs = vrState.scene.output[vrState.scene.outputSlot];
+  CHECK(pass->canvas.color[0].texture == outputs[0] && pass->canvas.stereo == outputs[1]);
+  CHECK(pass->target.color[0].resolve == outputs[0]->renderView && !vrState.scene.texture);
   CHECK(pass->target.color[0].clear[3] == 0.f && pass->target.depth.clear == 0.f);
   Texture* root;
   CHECK(sceneTexture(&root) && root && root->info.type == TEXTURE_ARRAY && root->info.layers == 2);
-  CHECK(root == pass->canvas.color[0].texture && root->info.samples == 1);
+  CHECK(root == vrState.scene.texture && root->info.samples == 1);
   for (unsigned eye = 0; eye < 2; eye++) {
-    CHECK(vrState.scene.output[eye]->root == vrState.scene.output[eye]);
-    CHECK(vrState.scene.output[eye]->info.type == TEXTURE_2D && vrState.scene.output[eye]->info.layers == 1);
+    for (unsigned slot = 0; slot < SCENE_OUTPUTS; slot++) {
+      Texture* output = vrState.scene.output[slot][eye];
+      CHECK(output->root == output && output->info.type == TEXTURE_2D && output->info.layers == 1);
+    }
     float expected[16], observed[16];
     mat4_init(expected, frame->eyes[eye].pose.matrix); mat4_invert(expected);
     CHECK(lovrPassGetViewMatrix(pass, eye, observed) && !memcmp(expected, observed, sizeof(expected)));
@@ -536,8 +574,8 @@ static bool sceneCanvas(void) {
   panelCopies = panelSubmissions = 0;
   CHECK(setLayers(&panel, 1, true) && submit());
   CHECK(panelCopies == 1 && panelSubmissions == 1);
-  CHECK(sceneCopies == 2 && sceneSubmissions == 2 && sceneCopiedEyes[0] == 0 && sceneCopiedEyes[1] == 1);
-  CHECK(sceneCopiedOutputs[0] != sceneCopiedOutputs[1]);
+  CHECK(sceneCopies == 0 && sceneSubmissions == 2);
+  CHECK(sceneHanded[0] == (uintptr_t) outputs[0]->gpu && sceneHanded[1] == (uintptr_t) outputs[1]->gpu);
   for (unsigned eye = 0; eye < 2; eye++) {
     // The overlay receives the view matrix that renders the eye, and the frustum with its downward edge in fTop.
     float renderedView[16];
@@ -559,6 +597,24 @@ static bool sceneCanvas(void) {
   sceneCopies = sceneSubmissions = panelCopies = panelSubmissions = 0;
   CHECK(submit() && sceneSubmissions == 2 && panelSubmissions == 1 && panelVisible);
   CHECK(runtimeHideCalls == steadyHides && runtimeShowCalls == steadyShows && runtimeFlagCalls == steadyFlags);
+  // SteamVR samples a handed-off image while the next frame renders, so consecutive frames use distinct images.
+  uintptr_t handed[4][2];
+  for (unsigned i = 0; i < 4; i++) {
+    sceneCopies = sceneSubmissions = panelCopies = panelSubmissions = 0;
+    CHECK(update() && scenePass(&repeated) && repeated == pass);
+    CHECK(pass->canvas.color[0].texture == vrState.scene.output[vrState.scene.outputSlot][0]);
+    CHECK(submit() && sceneCopies == 0 && sceneSubmissions == 2);
+    memcpy(handed[i], sceneHanded, sizeof(handed[i]));
+  }
+  for (unsigned i = 0; i < 3; i++) {
+    for (unsigned j = 0; j < 3; j++) CHECK((i == j) == (handed[i][0] == handed[j][0]) && handed[i][0] != handed[j][1]);
+  }
+  CHECK(handed[3][0] == handed[0][0] && handed[3][1] == handed[0][1]);
+  // A frame drawn through lovr.headset.getTexture still reaches SteamVR, by copying each layer of the array.
+  sceneCopies = sceneSubmissions = 0;
+  CHECK(update() && sceneTexture(&root) && root == vrState.scene.texture);
+  CHECK(submit() && sceneCopies == 2 && sceneSubmissions == 2 && sceneCopiedEyes[0] == 0 && sceneCopiedEyes[1] == 1);
+  CHECK(sceneCopiedOutputs[0] != sceneCopiedOutputs[1]);
   CHECK(setLayers(NULL, 0, true));
   // An unchanged pose is not reapplied, so the eye moves to make the transform call fail.
   vrState.scene.render.eyes[0].transform.m[0][3] += .01f;
@@ -605,6 +661,60 @@ static bool sceneCanvas(void) {
   sceneCopies = sceneSubmissions = 0;
   CHECK(update() && scenePass(&repeated) && repeated == pass && submit());
   CHECK(vrState.scene.projection.visible[0] && vrState.scene.projection.visible[1]);
+  // Frame timing reports the backend's pacing, and the compositor's frame once the runtime offers it.
+  HeadsetFrameTiming timing = { 0 };
+  CHECK(frameTiming(&timing) && timing.interval == vrState.frame.stats.interval && !timing.runtime);
+  CHECK(timing.work == vrState.frame.work && timing.prediction == vrState.frame.stats.prediction);
+  compositorFrame = (Compositor_FrameTiming) { .m_nSize = sizeof(compositorFrame), .m_nFrameIndex = 7,
+    .m_nNumFramePresents = 2, .m_nNumMisPresented = 1, .m_nNumDroppedFrames = 3, .m_nReprojectionFlags = 0x04,
+    .m_flCompositorRenderGpuMs = 2.5f, .m_flCompositorRenderCpuMs = 1.25f };
+  vrState.runtime.compositor = &runtimeCompositor;
+  timing = (HeadsetFrameTiming) { 0 };
+  CHECK(frameTiming(&timing) && timing.runtime && timing.compositor.frame == 7 && timing.compositor.presents == 2);
+  CHECK(timing.compositor.mispresented == 1 && timing.compositor.dropped == 3);
+  CHECK(fabs(timing.compositor.gpu - .0025) < 1e-9 && fabs(timing.compositor.cpu - .00125) < 1e-9);
+  // Asynchronous reprojection being available is not reprojection; a CPU or GPU reason is.
+  CHECK(!timing.compositor.reprojecting);
+  compositorFrame.m_nReprojectionFlags = 0x05;
+  CHECK(frameTiming(&timing) && timing.compositor.reprojecting);
+  vrState.runtime.compositor = NULL;
+  // Foveation needs the density map extension, which this GPU reports only once the test grants it.
+  FoveationLevel level; bool dynamic;
+  state.features.foveation = false;
+  state.limits.foveationTexelSize[0] = state.limits.foveationTexelSize[1] = 0;
+  CHECK(!setFoveationOverlay(true) && !getFoveationOverlay() && setFoveationOverlay(false));
+  gazeQueries = 0;
+  CHECK(!setFoveation(FOVEATION_HIGH, true));
+  getFoveation(&level, &dynamic);
+  CHECK(level == FOVEATION_NONE && !dynamic && !pass->canvas.foveation && gazeQueries == 0);
+  state.features.foveation = true;
+  state.limits.foveationTexelSize[0] = state.limits.foveationTexelSize[1] = 16;
+  CHECK(setFoveation(FOVEATION_HIGH, true));
+  getFoveation(&level, &dynamic);
+  CHECK(level == FOVEATION_HIGH && dynamic);
+  CHECK(setFoveationOverlay(true) && getFoveationOverlay() && setFoveationOverlay(false) && !getFoveationOverlay());
+  sceneCopies = sceneSubmissions = 0;
+  CHECK(update() && scenePass(&repeated) && repeated == pass);
+  Texture** maps = vrState.scene.foveation;
+  CHECK(maps[0] && maps[1] && pass->canvas.foveation == maps[0] && pass->canvas.stereoFoveation == maps[1]);
+  CHECK(pass->target.foveation == maps[0]->gpu);
+  for (unsigned eye = 0; eye < 2; eye++) {
+    CHECK(maps[eye]->info.type == TEXTURE_2D && maps[eye]->info.format == FORMAT_RG8 && maps[eye]->info.layers == 1);
+    CHECK(maps[eye]->info.width == (sceneWidth + 15) / 16 && maps[eye]->info.height == (sceneHeight + 15) / 16);
+  }
+  CHECK(foveationUploads == 2 && foveationEyes[0] == 0 && foveationEyes[1] == 1 && gazeQueries == 1);
+  CHECK(submit() && sceneSubmissions == 2);
+  foveationUploads = 0;
+  sceneCopies = sceneSubmissions = 0;
+  CHECK(update() && scenePass(&repeated) && pass->canvas.foveation == maps[0] && foveationUploads == 2 && gazeQueries == 2);
+  CHECK(submit());
+  CHECK(setFoveation(FOVEATION_NONE, true));
+  getFoveation(&level, &dynamic);
+  CHECK(level == FOVEATION_NONE && !dynamic);
+  foveationUploads = 0;
+  sceneCopies = sceneSubmissions = 0;
+  CHECK(update() && scenePass(&repeated) && !pass->canvas.foveation && !pass->canvas.stereoFoveation && !pass->target.foveation);
+  CHECK(foveationUploads == 0 && gazeQueries == 2 && submit());
   for (unsigned failure = 0; failure < 2; failure++) {
     activeInputPose = true;
     CHECK(update() && vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));

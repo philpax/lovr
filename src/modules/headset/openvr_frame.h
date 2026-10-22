@@ -46,10 +46,19 @@ typedef struct {
   OpenVRFrameEye eyes[2];
 } OpenVRFrameSnapshot;
 
+// Pacing of the latest successful update, which is invalid after an update that predicts nothing.
+typedef struct {
+  double interval;
+  float prediction;
+  uint32_t skipped;
+  bool valid;
+} OpenVRFrameStats;
+
 typedef struct {
   struct VR_IVRSystem_FnTable* system;
   struct VR_IVROverlay_FnTable* overlay;
   OpenVRFrameSnapshot snapshot;
+  OpenVRFrameStats stats;
   uint64_t serial;
   double lastNow;
   double epoch;

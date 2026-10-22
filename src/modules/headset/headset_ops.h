@@ -30,6 +30,10 @@ typedef struct HeadsetOps {
   bool (*HeadsetSetRefreshRate)(float refreshRate);
   void (*HeadsetGetFoveation)(FoveationLevel* level, bool* dynamic);
   bool (*HeadsetSetFoveation)(FoveationLevel level, bool dynamic);
+  // Optional: a backend without frame timing or a foveation overlay leaves these null.
+  bool (*HeadsetGetFrameTiming)(HeadsetFrameTiming* timing);
+  bool (*HeadsetGetFoveationOverlay)(void);
+  bool (*HeadsetSetFoveationOverlay)(bool enabled);
   bool (*HeadsetIsHDR)(void);
   bool (*HeadsetIsPassthroughSupported)(PassthroughMode mode);
   PassthroughMode (*HeadsetGetPassthrough)(void);

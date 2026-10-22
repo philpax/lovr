@@ -24,6 +24,9 @@ static OpenVRAssetsResult backendAssetsResolve(bool shared, const OpenVRAssetsPr
 #define validate assetsValidate
 #include "../../src/modules/headset/openvr_assets.c"
 #undef validate
+#define validTangents foveationValidTangents
+#include "../../src/modules/headset/openvr_foveation.c"
+#undef validTangents
 static Event backendEvents[32];
 static unsigned backendEventCount;
 void lovrEventPush(Event event) {
@@ -151,6 +154,17 @@ void lovrGraphicsInvalidateSessionTexture(Texture* texture) { if (texture) abort
 bool lovrGraphicsRegisterSessionPass(Pass* pass) { (void) pass; abort(); }
 bool lovrGraphicsRegisterSessionTexture(Texture* texture) { (void) texture; abort(); }
 Texture* lovrTextureCreate(const TextureInfo* info) { (void) info; abort(); }
+bool lovrGraphicsGetFoveationTexelSize(uint32_t size[2]) { size[0] = size[1] = 0; return false; }
+bool lovrTextureSetPixels(Texture* texture, Image* image, uint32_t a[4], uint32_t b[4], uint32_t extent[3]) {
+  (void) texture; (void) image; (void) a; (void) b; (void) extent; abort();
+}
+Image* lovrImageCreateRaw(uint32_t width, uint32_t height, TextureFormat format, bool srgb) {
+  (void) width; (void) height; (void) format; (void) srgb; abort();
+}
+void* lovrImageGetLayerData(Image* image, uint32_t level, uint32_t layer) { (void) image; (void) level; (void) layer; abort(); }
+void lovrImageDestroy(void* ref) { if (ref) abort(); }
+bool lovrPassFill(Pass* pass, Texture* texture) { (void) pass; (void) texture; abort(); }
+bool lovrGraphicsSubmit(Pass** passes, uint32_t count) { (void) passes; (void) count; abort(); }
 const TextureInfo* lovrTextureGetInfo(Texture* texture) { (void) texture; abort(); }
 void lovrTextureDestroy(void* ref) { (void) ref; abort(); }
 Pass* lovrPassCreate(const char* label) { (void) label; abort(); }

@@ -138,6 +138,18 @@ var headset = {
     return false;
   },
 
+  lovrHeadsetGetFrameTiming(timing) {
+    return false;
+  },
+
+  lovrHeadsetGetFoveationOverlay() {
+    return false;
+  },
+
+  lovrHeadsetSetFoveationOverlay(enabled) {
+    return !enabled;
+  },
+
   lovrHeadsetIsHDR() {
     return false;
   },

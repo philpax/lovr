@@ -274,6 +274,19 @@ bool lovrHeadsetSetFoveation(FoveationLevel level, bool dynamic) {
   return ops->HeadsetSetFoveation(level, dynamic);
 }
 
+bool lovrHeadsetGetFrameTiming(HeadsetFrameTiming* timing) {
+  memset(timing, 0, sizeof(*timing));
+  return ops->HeadsetGetFrameTiming && ops->HeadsetGetFrameTiming(timing);
+}
+
+bool lovrHeadsetGetFoveationOverlay(void) {
+  return ops->HeadsetGetFoveationOverlay && ops->HeadsetGetFoveationOverlay();
+}
+
+bool lovrHeadsetSetFoveationOverlay(bool enabled) {
+  return ops->HeadsetSetFoveationOverlay ? ops->HeadsetSetFoveationOverlay(enabled) : !enabled;
+}
+
 bool lovrHeadsetIsHDR(void) {
   return ops->HeadsetIsHDR();
 }

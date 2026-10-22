@@ -123,6 +123,7 @@ void lovrGraphicsDestroyWorker(void);
 void lovrGraphicsGetDevice(GraphicsDevice* device);
 void lovrGraphicsGetFeatures(GraphicsFeatures* features);
 void lovrGraphicsGetLimits(GraphicsLimits* limits);
+bool lovrGraphicsGetFoveationTexelSize(uint32_t size[2]);
 void lovrGraphicsGetStats(GraphicsStats* stats);
 uint32_t lovrGraphicsGetFormatSupport(uint32_t format, uint32_t features);
 void lovrGraphicsGetShaderCache(void* data, size_t* size);
@@ -626,6 +627,9 @@ typedef struct {
   Attachment color[4];
   Attachment depth;
   Texture* foveation;
+  // A stereo canvas renders the second view into these instead of a second layer of the first color texture.
+  Texture* stereo;
+  Texture* stereoFoveation;
   uint32_t depthFormat;
   uint32_t samples;
 } Canvas;

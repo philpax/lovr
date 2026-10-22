@@ -80,6 +80,25 @@ typedef enum {
   FOVEATION_HIGH
 } FoveationLevel;
 
+// Pacing of the latest frame, in seconds. The runtime fields describe the compositor's most recent frame
+// and are filled only where the runtime reports them.
+typedef struct {
+  double interval;
+  double work;
+  double prediction;
+  uint32_t skipped;
+  bool runtime;
+  struct {
+    uint32_t frame;
+    uint32_t presents;
+    uint32_t mispresented;
+    uint32_t dropped;
+    double gpu;
+    double cpu;
+    bool reprojecting;
+  } compositor;
+} HeadsetFrameTiming;
+
 typedef enum {
   PASSTHROUGH_OPAQUE,
   PASSTHROUGH_BLEND,
@@ -200,6 +219,9 @@ float lovrHeadsetGetRefreshRate(void);
 bool lovrHeadsetSetRefreshRate(float refreshRate);
 void lovrHeadsetGetFoveation(FoveationLevel* level, bool* dynamic);
 bool lovrHeadsetSetFoveation(FoveationLevel level, bool dynamic);
+bool lovrHeadsetGetFrameTiming(HeadsetFrameTiming* timing);
+bool lovrHeadsetGetFoveationOverlay(void);
+bool lovrHeadsetSetFoveationOverlay(bool enabled);
 bool lovrHeadsetIsHDR(void);
 bool lovrHeadsetIsPassthroughSupported(PassthroughMode mode);
 PassthroughMode lovrHeadsetGetPassthrough(void);

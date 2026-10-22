@@ -759,7 +759,8 @@ static bool checkCanvasSession(Canvas* canvas) {
     if (!checkTextureSession(canvas->color[i].texture) || !checkTextureSession(canvas->color[i].resolve)) return false;
   }
   return checkTextureSession(canvas->depth.texture) && checkTextureSession(canvas->depth.resolve) &&
-    checkTextureSession(canvas->foveation);
+    checkTextureSession(canvas->foveation) && checkTextureSession(canvas->stereo) &&
+    checkTextureSession(canvas->stereoFoveation);
 }
 
 static bool checkPassSession(Pass* pass) {
@@ -1170,6 +1171,13 @@ void lovrGraphicsGetFeatures(GraphicsFeatures* features) {
   features->queueFamilyForeign = state.features.queueFamilyForeign;
 }
 
+bool lovrGraphicsGetFoveationTexelSize(uint32_t size[2]) {
+  bool supported = state.features.foveation && state.limits.foveationTexelSize[0] && state.limits.foveationTexelSize[1];
+  size[0] = supported ? state.limits.foveationTexelSize[0] : 0;
+  size[1] = supported ? state.limits.foveationTexelSize[1] : 0;
+  return supported;
+}
+
 void lovrGraphicsGetLimits(GraphicsLimits* limits) {
   limits->textureSize2D = state.limits.textureSize2D;
   limits->textureSize3D = state.limits.textureSize3D;
@@ -1546,9 +1554,25 @@ static bool recordRenderPass(Pass* pass, gpu_stream* stream, gpu_timestamp_write
 
   pass->stats.drawsCulled = pass->drawCount - activeDrawCount;
 
+  // A stereo canvas plays the draws back once per view, each into its own texture, with single-view
+  // pipelines. The first view begins the pass's timestamps and the last view ends them.
+  bool stereo = canvas->stereo != NULL;
+  uint32_t targetCount = stereo ? 2 : 1;
+  gpu_canvas targets[2] = { pass->target, pass->target };
+  if (stereo) {
+    if (pass->tempColor[0]) {
+      targets[1].color[0].resolve = canvas->stereo->renderView;
+    } else {
+      targets[1].color[0].texture = canvas->stereo->renderView;
+    }
+    targets[1].foveation = canvas->stereoFoveation ? canvas->stereoFoveation->gpu : NULL;
+  }
+
   if (activeDrawCount == 0) {
-    gpu_render_begin(stream, &pass->target, timestamps);
-    gpu_render_end(stream, &pass->target, timestamps);
+    for (uint32_t v = 0; v < targetCount; v++) {
+      gpu_render_begin(stream, &targets[v], v == 0 ? timestamps : NULL);
+      gpu_render_end(stream, &targets[v], v == targetCount - 1 ? timestamps : NULL);
+    }
     return true;
   }
 
@@ -1578,7 +1602,7 @@ static bool recordRenderPass(Pass* pass, gpu_stream* stream, gpu_timestamp_write
 #endif
 
   // Cameras
-  uint32_t padding = (6 - pass->views) * sizeof(Camera); // Ensure shader can always access all 6 cameras
+  uint32_t padding = (6 - pass->views + stereo) * sizeof(Camera); // Ensure shader can always access all 6 cameras, including from the second stereo view
   view = getBuffer(GPU_BUFFER_STREAM, pass->cameraCount * pass->views * sizeof(Camera) + padding, align);
   if (!view.buffer) return false;
   builtins[1].buffer = (gpu_buffer_binding) { view.buffer, view.offset, 6 * sizeof(Camera) };
@@ -1651,127 +1675,132 @@ static bool recordRenderPass(Pass* pass, gpu_stream* stream, gpu_timestamp_write
     pass->target.pixelTally = NULL;
   }
 
+  // The per-view targets were copied before the tally was known.
+  targets[0].pixelTally = targets[1].pixelTally = pass->target.pixelTally;
+
   // Do the thing!
 
-  uint8_t tally = 0xff;
-  uint16_t cameraIndex = 0xffff;
-  uint16_t viewport = 0xffff;
-  uint16_t scissor = 0xffff;
-  gpu_pipeline* pipeline = NULL;
-  gpu_bundle* bundle = NULL;
-  Material* material = NULL;
-  gpu_buffer* vertexBuffer = NULL;
-  uint32_t vertexBufferOffset = 0;
-  gpu_buffer* indexBuffer = NULL;
-  gpu_index_type indexType = 0;
-  gpu_buffer* uniformBuffer = NULL;
-  uint32_t uniformOffset = 0;
-  uint32_t uniformSize = 0;
-  gpu_bundle* uniformBundle = NULL;
+  for (uint32_t v = 0; v < targetCount; v++) {
+    uint8_t tally = 0xff;
+    uint16_t cameraIndex = 0xffff;
+    uint16_t viewport = 0xffff;
+    uint16_t scissor = 0xffff;
+    gpu_pipeline* pipeline = NULL;
+    gpu_bundle* bundle = NULL;
+    Material* material = NULL;
+    gpu_buffer* vertexBuffer = NULL;
+    uint32_t vertexBufferOffset = 0;
+    gpu_buffer* indexBuffer = NULL;
+    gpu_index_type indexType = 0;
+    gpu_buffer* uniformBuffer = NULL;
+    uint32_t uniformOffset = 0;
+    uint32_t uniformSize = 0;
+    gpu_bundle* uniformBundle = NULL;
 
-  gpu_render_begin(stream, &pass->target, timestamps);
-  gpu_bind_vertex_buffers(stream, &state.defaultBuffer->gpu, NULL, 1, 1);
+    gpu_render_begin(stream, &targets[v], v == 0 ? timestamps : NULL);
+    gpu_bind_vertex_buffers(stream, &state.defaultBuffer->gpu, NULL, 1, 1);
 
-  for (uint32_t i = 0; i < activeDrawCount; i++) {
-    Draw* draw = &pass->draws[activeDraws[i]];
+    for (uint32_t i = 0; i < activeDrawCount; i++) {
+      Draw* draw = &pass->draws[activeDraws[i]];
 
-    if (pass->tally.buffer && draw->tally != tally) {
-      if (tally != 0xff) gpu_tally_finish(stream, pass->tally.gpu, tally * pass->views);
-      if (draw->tally != 0xff) gpu_tally_begin(stream, pass->tally.gpu, draw->tally * pass->views);
-      tally = draw->tally;
-    }
+      if (pass->tally.buffer && draw->tally != tally) {
+        if (tally != 0xff) gpu_tally_finish(stream, pass->tally.gpu, tally * pass->views + (stereo ? v : 0));
+        if (draw->tally != 0xff) gpu_tally_begin(stream, pass->tally.gpu, draw->tally * pass->views + (stereo ? v : 0));
+        tally = draw->tally;
+      }
 
-    if (draw->viewport != viewport) {
-      float* v = pass->viewports + draw->viewport * 6;
-      gpu_set_viewport(stream, v, v + 4);
-      viewport = draw->viewport;
-    }
+      if (draw->viewport != viewport) {
+        float* rect = pass->viewports + draw->viewport * 6;
+        gpu_set_viewport(stream, rect, rect + 4);
+        viewport = draw->viewport;
+      }
 
-    if (draw->scissor != scissor) {
-      gpu_set_scissor(stream, pass->scissors + draw->scissor * 4);
-      scissor = draw->scissor;
-    }
+      if (draw->scissor != scissor) {
+        gpu_set_scissor(stream, pass->scissors + draw->scissor * 4);
+        scissor = draw->scissor;
+      }
 
-    if (draw->pipeline != pipeline) {
-      gpu_bind_pipeline(stream, draw->pipeline, GPU_PIPELINE_GRAPHICS);
-      pipeline = draw->pipeline;
-    }
+      if (draw->pipeline != pipeline) {
+        gpu_bind_pipeline(stream, draw->pipeline, GPU_PIPELINE_GRAPHICS);
+        pipeline = draw->pipeline;
+      }
 
-    if ((i & 0xff) == 0 || draw->camera != cameraIndex) {
-      uint32_t dynamicOffsets[] = { draw->camera * pass->views * sizeof(Camera), (i >> 8) * 256 * sizeof(DrawData) };
-      gpu_bind_bundles(stream, draw->shader->gpu, &builtinBundle, 0, 1, dynamicOffsets, COUNTOF(dynamicOffsets));
-      cameraIndex = draw->camera;
-    }
+      if ((i & 0xff) == 0 || draw->camera != cameraIndex) {
+        uint32_t dynamicOffsets[] = { (draw->camera * pass->views + (stereo ? v : 0)) * sizeof(Camera), (i >> 8) * 256 * sizeof(DrawData) };
+        gpu_bind_bundles(stream, draw->shader->gpu, &builtinBundle, 0, 1, dynamicOffsets, COUNTOF(dynamicOffsets));
+        cameraIndex = draw->camera;
+      }
 
-    if (draw->material != material) {
-      gpu_bind_bundles(stream, draw->shader->gpu, &draw->material->bundle, 1, 1, NULL, 0);
-      material = draw->material;
-    }
+      if (draw->material != material) {
+        gpu_bind_bundles(stream, draw->shader->gpu, &draw->material->bundle, 1, 1, NULL, 0);
+        material = draw->material;
+      }
 
-    if (draw->bundle && (draw->bundle != bundle)) {
-      gpu_bind_bundles(stream, draw->shader->gpu, &draw->bundle, 2, 1, NULL, 0);
-      bundle = draw->bundle;
-    }
+      if (draw->bundle && (draw->bundle != bundle)) {
+        gpu_bind_bundles(stream, draw->shader->gpu, &draw->bundle, 2, 1, NULL, 0);
+        bundle = draw->bundle;
+      }
 
-    if (draw->uniformBuffer && (draw->uniformBuffer != uniformBuffer || draw->uniformOffset != uniformOffset)) {
-      if (draw->uniformBuffer != uniformBuffer || draw->shader->uniformSize != uniformSize) {
-        uniformSize = draw->shader->uniformSize;
-        uniformBundle = getBundle(state.uniformLayout, &(gpu_binding) {
-          .number = 0,
-          .type = GPU_SLOT_UNIFORM_BUFFER_DYNAMIC,
-          .buffer.object = draw->uniformBuffer,
-          .buffer.extent = draw->shader->uniformSize
-        }, 1);
+      if (draw->uniformBuffer && (draw->uniformBuffer != uniformBuffer || draw->uniformOffset != uniformOffset)) {
+        if (draw->uniformBuffer != uniformBuffer || draw->shader->uniformSize != uniformSize) {
+          uniformSize = draw->shader->uniformSize;
+          uniformBundle = getBundle(state.uniformLayout, &(gpu_binding) {
+            .number = 0,
+            .type = GPU_SLOT_UNIFORM_BUFFER_DYNAMIC,
+            .buffer.object = draw->uniformBuffer,
+            .buffer.extent = draw->shader->uniformSize
+          }, 1);
 
-        if (!uniformBundle) {
-          return false;
+          if (!uniformBundle) {
+            return false;
+          }
+        }
+
+        gpu_bind_bundles(stream, draw->shader->gpu, &uniformBundle, 3, 1, &draw->uniformOffset, 1);
+        uniformBuffer = draw->uniformBuffer;
+        uniformOffset = draw->uniformOffset;
+      }
+
+      if (draw->vertexBuffer && (draw->vertexBuffer != vertexBuffer || draw->vertexBufferOffset != vertexBufferOffset)) {
+        gpu_bind_vertex_buffers(stream, &draw->vertexBuffer, &draw->vertexBufferOffset, 0, 1);
+        vertexBuffer = draw->vertexBuffer;
+        vertexBufferOffset = draw->vertexBufferOffset;
+      }
+
+      if (draw->indexBuffer) {
+        gpu_index_type type = (draw->flags & DRAW_INDEX32) ? GPU_INDEX_U32 : GPU_INDEX_U16;
+        if (draw->indexBuffer != indexBuffer || type != indexType) {
+          gpu_bind_index_buffer(stream, draw->indexBuffer, 0, type);
+          indexBuffer = draw->indexBuffer;
+          indexType = type;
         }
       }
 
-      gpu_bind_bundles(stream, draw->shader->gpu, &uniformBundle, 3, 1, &draw->uniformOffset, 1);
-      uniformBuffer = draw->uniformBuffer;
-      uniformOffset = draw->uniformOffset;
-    }
-
-    if (draw->vertexBuffer && (draw->vertexBuffer != vertexBuffer || draw->vertexBufferOffset != vertexBufferOffset)) {
-      gpu_bind_vertex_buffers(stream, &draw->vertexBuffer, &draw->vertexBufferOffset, 0, 1);
-      vertexBuffer = draw->vertexBuffer;
-      vertexBufferOffset = draw->vertexBufferOffset;
-    }
-
-    if (draw->indexBuffer) {
-      gpu_index_type type = (draw->flags & DRAW_INDEX32) ? GPU_INDEX_U32 : GPU_INDEX_U16;
-      if (draw->indexBuffer != indexBuffer || type != indexType) {
-        gpu_bind_index_buffer(stream, draw->indexBuffer, 0, type);
-        indexBuffer = draw->indexBuffer;
-        indexType = type;
+      if (draw->shader->pushConstantSize >= 4) {
+        gpu_push_constants(stream, draw->shader->gpu, (uint32_t[1]) { i & 0xff }, 4);
       }
-    }
 
-    if (draw->shader->pushConstantSize >= 4) {
-      gpu_push_constants(stream, draw->shader->gpu, (uint32_t[1]) { i & 0xff }, 4);
-    }
-
-    if (draw->flags & DRAW_INDIRECT) {
-      if (draw->indexBuffer) {
-        gpu_draw_indirect_indexed(stream, draw->indirect.buffer, draw->indirect.offset, draw->indirect.count, draw->indirect.stride);
+      if (draw->flags & DRAW_INDIRECT) {
+        if (draw->indexBuffer) {
+          gpu_draw_indirect_indexed(stream, draw->indirect.buffer, draw->indirect.offset, draw->indirect.count, draw->indirect.stride);
+        } else {
+          gpu_draw_indirect(stream, draw->indirect.buffer, draw->indirect.offset, draw->indirect.count, draw->indirect.stride);
+        }
       } else {
-        gpu_draw_indirect(stream, draw->indirect.buffer, draw->indirect.offset, draw->indirect.count, draw->indirect.stride);
-      }
-    } else {
-      if (draw->indexBuffer) {
-        gpu_draw_indexed(stream, draw->count, draw->instances, draw->start, draw->baseVertex, 0);
-      } else {
-        gpu_draw(stream, draw->count, draw->instances, draw->start, 0);
+        if (draw->indexBuffer) {
+          gpu_draw_indexed(stream, draw->count, draw->instances, draw->start, draw->baseVertex, 0);
+        } else {
+          gpu_draw(stream, draw->count, draw->instances, draw->start, 0);
+        }
       }
     }
-  }
 
-  if (tally != 0xff) {
-    gpu_tally_finish(stream, pass->tally.gpu, tally * pass->views);
-  }
+    if (tally != 0xff) {
+      gpu_tally_finish(stream, pass->tally.gpu, tally * pass->views + (stereo ? v : 0));
+    }
 
-  gpu_render_end(stream, &pass->target, timestamps);
+    gpu_render_end(stream, &targets[v], v == targetCount - 1 ? timestamps : NULL);
+  }
 
   // Automipmap
 
@@ -1959,6 +1988,35 @@ static bool submitLocked(Pass** passes, uint32_t count) {
       xrCanvas |= attachment->texture->info.xr || (attachment->resolve && attachment->resolve->info.xr);
     }
 
+    // The second view of a stereo canvas, which resolves into its texture when the pass is multisampled
+    if (canvas->stereo) {
+      bool load = pass->target.color[0].load == GPU_LOAD_OP_KEEP;
+      syncAttachment(canvas->stereo, false, pass->tempColor[0], load && !pass->tempColor[0], false);
+    }
+
+    // Fragment density maps
+    if (canvas->stereoFoveation) {
+      Access access = {
+        .sync = canvas->stereoFoveation->sync,
+        .object = canvas->stereoFoveation,
+        .phase = GPU_PHASE_FRAGMENT_DENSITY,
+        .cache = GPU_CACHE_FRAGMENT_DENSITY
+      };
+
+      syncResource(&access, access.sync->barrier);
+    }
+
+    if (canvas->foveation) {
+      Access access = {
+        .sync = canvas->foveation->sync,
+        .object = canvas->foveation,
+        .phase = GPU_PHASE_FRAGMENT_DENSITY,
+        .cache = GPU_CACHE_FRAGMENT_DENSITY
+      };
+
+      syncResource(&access, access.sync->barrier);
+    }
+
     // Render resources (all read-only)
     for (AccessBlock* block = pass->access[ACCESS_RENDER]; block != NULL; block = block->next) {
       for (uint64_t j = 0; j < block->count; j++) {
@@ -2119,6 +2177,9 @@ static bool submitLocked(Pass** passes, uint32_t count) {
 
     if (canvas->depth.texture) canvas->depth.texture->sync->barrier = &state.barrier;
     if (canvas->depth.resolve) canvas->depth.resolve->sync->barrier = &state.barrier;
+    if (canvas->foveation) canvas->foveation->sync->barrier = &state.barrier;
+    if (canvas->stereo) canvas->stereo->sync->barrier = &state.barrier;
+    if (canvas->stereoFoveation) canvas->stereoFoveation->sync->barrier = &state.barrier;
 
     for (uint32_t j = 0; j < COUNTOF(passes[i]->access); j++) {
       for (AccessBlock* block = passes[i]->access[j]; block != NULL; block = block->next) {
@@ -7341,7 +7402,7 @@ void lovrPassReset(Pass* pass) {
 
   pass->pipeline->info.depth.format = (gpu_texture_format) (canvas->depth.texture ? canvas->depth.texture->info.format : canvas->depthFormat);
   pass->pipeline->info.multisample.count = canvas->samples;
-  pass->pipeline->info.viewCount = pass->views;
+  pass->pipeline->info.viewCount = pass->canvas.stereo ? 1 : pass->views;
   pass->pipeline->info.foveated = canvas->foveation;
 
   pass->cameraCount = 0;
@@ -7411,6 +7472,8 @@ bool lovrPassSetCanvas(Pass* pass, Canvas* canvas) {
     lovrRelease(canvas->depth.texture, lovrTextureDestroy);
     lovrRelease(canvas->depth.resolve, lovrTextureDestroy);
     lovrRelease(canvas->foveation, lovrTextureDestroy);
+    lovrRelease(canvas->stereo, lovrTextureDestroy);
+    lovrRelease(canvas->stereoFoveation, lovrTextureDestroy);
     memset(canvas, 0, sizeof(Canvas));
     pass->width = 0;
     pass->height = 0;
@@ -7480,6 +7543,24 @@ bool lovrPassSetCanvas(Pass* pass, Canvas* canvas) {
     lovrCheck(state.features.formats[canvas->depthFormat][0] & GPU_FEATURE_RENDER, "Canvas depth format is not supported by this GPU");
   }
 
+  if (canvas->stereo) {
+    const TextureInfo* info = &canvas->stereo->info;
+    lovrCheck(color->texture && !color[1].texture && !color->resolve && !depth->texture, "A stereo canvas has one color texture per view and a temporary depth buffer");
+    lovrCheck(texture->layers == 1 && info->layers == 1, "Stereo canvas textures must have a single layer");
+    lovrCheck(info->format == texture->format && info->srgb == texture->srgb, "Stereo canvas texture formats must match");
+    lovrCheck(info->width == texture->width && info->height == texture->height, "Canvas texture sizes must match");
+    lovrCheck(info->samples == texture->samples, "Stereo canvas textures must have the same sample count");
+    lovrCheck(info->usage & TEXTURE_RENDER, "Texture must be created with the 'render' usage to render to it");
+    // Mipmap generation and XR swapchain transitions cover only the first color texture.
+    lovrCheck(info->mipmaps == 1 && texture->mipmaps == 1, "Stereo canvas textures can not have mipmaps");
+    lovrCheck(!info->xr && !texture->xr, "Stereo canvases can not render into XR swapchain textures");
+    lovrCheck(!canvas->foveation == !canvas->stereoFoveation, "A stereo canvas needs a density map for both views or neither");
+  } else {
+    lovrCheck(!canvas->stereoFoveation, "Only a stereo canvas has a second density map");
+  }
+
+  uint32_t views = canvas->stereo ? 2 : texture->layers;
+
   // Create temporary textures, trying to reuse existing ones when possible
 
   gpu_texture* tempColorTextures[4] = { 0 };
@@ -7488,7 +7569,8 @@ bool lovrPassSetCanvas(Pass* pass, Canvas* canvas) {
   bool compatible = true;
   compatible &= pass->width == texture->width;
   compatible &= pass->height == texture->height;
-  compatible &= pass->views == texture->layers;
+  compatible &= pass->views == views;
+  compatible &= !pass->canvas.stereo == !canvas->stereo;
   compatible &= pass->canvas.samples == samples;
 
   for (uint32_t i = 0; i < 4 && color[i].texture; i++) {
@@ -7577,12 +7659,16 @@ bool lovrPassSetCanvas(Pass* pass, Canvas* canvas) {
 
   lovrRelease(pass->canvas.foveation, lovrTextureDestroy);
   lovrRetain(canvas->foveation);
+  lovrRelease(pass->canvas.stereo, lovrTextureDestroy);
+  lovrRetain(canvas->stereo);
+  lovrRelease(pass->canvas.stereoFoveation, lovrTextureDestroy);
+  lovrRetain(canvas->stereoFoveation);
 
   pass->canvas = *canvas;
   pass->canvas.samples = samples;
   pass->width = texture->width;
   pass->height = texture->height;
-  pass->views = texture->layers;
+  pass->views = views;
 
   // Set up gpu_canvas
 

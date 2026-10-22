@@ -311,6 +311,53 @@ static int l_lovrHeadsetSetFoveation(lua_State* L) {
   }
 }
 
+static int l_lovrHeadsetGetFrameTiming(lua_State* L) {
+  HeadsetFrameTiming timing;
+  if (!lovrHeadsetGetFrameTiming(&timing)) {
+    lua_pushnil(L);
+    return 1;
+  }
+  lua_createtable(L, 0, 5);
+  lua_pushnumber(L, timing.interval);
+  lua_setfield(L, -2, "interval");
+  lua_pushnumber(L, timing.work);
+  lua_setfield(L, -2, "work");
+  lua_pushnumber(L, timing.prediction);
+  lua_setfield(L, -2, "prediction");
+  lua_pushinteger(L, timing.skipped);
+  lua_setfield(L, -2, "skipped");
+  if (timing.runtime) {
+    lua_createtable(L, 0, 7);
+    lua_pushinteger(L, timing.compositor.frame);
+    lua_setfield(L, -2, "frame");
+    lua_pushnumber(L, timing.compositor.gpu);
+    lua_setfield(L, -2, "gpu");
+    lua_pushnumber(L, timing.compositor.cpu);
+    lua_setfield(L, -2, "cpu");
+    lua_pushinteger(L, timing.compositor.presents);
+    lua_setfield(L, -2, "presents");
+    lua_pushinteger(L, timing.compositor.mispresented);
+    lua_setfield(L, -2, "mispresented");
+    lua_pushinteger(L, timing.compositor.dropped);
+    lua_setfield(L, -2, "dropped");
+    lua_pushboolean(L, timing.compositor.reprojecting);
+    lua_setfield(L, -2, "reprojecting");
+    lua_setfield(L, -2, "compositor");
+  }
+  return 1;
+}
+
+static int l_lovrHeadsetGetFoveationOverlay(lua_State* L) {
+  lua_pushboolean(L, lovrHeadsetGetFoveationOverlay());
+  return 1;
+}
+
+static int l_lovrHeadsetSetFoveationOverlay(lua_State* L) {
+  bool enabled = lua_toboolean(L, 1);
+  lua_pushboolean(L, lovrHeadsetSetFoveationOverlay(enabled));
+  return 1;
+}
+
 static int l_lovrHeadsetIsHDR(lua_State* L) {
   lua_pushboolean(L, lovrHeadsetIsHDR());
   return 1;
@@ -1134,6 +1181,9 @@ static const luaL_Reg lovrHeadset[] = {
   { "getRefreshRates", l_lovrHeadsetGetRefreshRates },
   { "getFoveation", l_lovrHeadsetGetFoveation },
   { "setFoveation", l_lovrHeadsetSetFoveation },
+  { "getFrameTiming", l_lovrHeadsetGetFrameTiming },
+  { "getFoveationOverlay", l_lovrHeadsetGetFoveationOverlay },
+  { "setFoveationOverlay", l_lovrHeadsetSetFoveationOverlay },
   { "isHDR", l_lovrHeadsetIsHDR },
   { "getPassthrough", l_lovrHeadsetGetPassthrough },
   { "setPassthrough", l_lovrHeadsetSetPassthrough },

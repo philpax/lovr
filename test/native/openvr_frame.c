@@ -393,10 +393,28 @@ static bool submissionWork(void) {
   return true;
 }
 
+static bool timingStats(void) {
+  OpenVRFrame frame = setup();
+  CHECK(!frame.stats.valid);
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.).status == OPENVR_FRAME_OK);
+  CHECK(frame.stats.valid && frame.stats.interval == 0. && frame.stats.skipped == 0);
+  CHECK(closeTo(frame.stats.prediction, .021));
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.01).status == OPENVR_FRAME_OK);
+  CHECK(closeTo(frame.stats.interval, .01) && frame.stats.skipped == 0);
+  // A frame that starts three refreshes after its predecessor leaves two refreshes showing the older frame.
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.04).status == OPENVR_FRAME_OK);
+  CHECK(closeTo(frame.stats.interval, .03) && frame.stats.skipped == 2);
+  fake.timing = false;
+  updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.05);
+  CHECK(!frame.stats.valid);
+  return true;
+}
+
 int main(int argc, char** argv) {
   NativeTest tests[] = {
     { "predicted_pose_conversion", predictedPose },
     { "prediction_submission_work", submissionWork },
+    { "frame_timing_stats", timingStats },
     { "overlay_frame_timeout", timeoutProgress },
     { "frame_invalid_inputs", invalidInputs },
     { "frame_session_clock_reset", sessionClock },

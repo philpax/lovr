@@ -325,6 +325,7 @@ static bool hasExtension(VkExtensionProperties* extensions, uint32_t count, cons
 static VkBufferUsageFlags getBufferUsage(gpu_buffer_type type);
 static bool transitionAttachment(gpu_texture* texture, bool begin, bool resolve, bool discard, VkImageMemoryBarrier2KHR* barrier);
 static VkImageLayout getNaturalLayout(uint32_t usage);
+static VkImageLayout getFoveationLayout(gpu_texture* texture);
 static VkFormat convertFormat(gpu_texture_format format, int colorspace);
 static VkFormat convertAttributeType(gpu_attribute_type type);
 static VkPipelineStageFlags2 convertPhase(gpu_phase phase, bool dst);
@@ -2438,7 +2439,7 @@ void gpu_render_begin(gpu_stream* stream, gpu_canvas* canvas, gpu_timestamp_writ
       foveation = (VkRenderingFragmentDensityMapAttachmentInfoEXT) {
         .sType = VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_DENSITY_MAP_ATTACHMENT_INFO_EXT,
         .imageView = canvas->foveation->view,
-        .imageLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT
+        .imageLayout = getFoveationLayout(canvas->foveation)
       };
     }
 
@@ -2566,8 +2567,8 @@ void gpu_render_begin(gpu_stream* stream, gpu_canvas* canvas, gpu_timestamp_writ
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
         .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT,
-        .finalLayout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT
+        .initialLayout = getFoveationLayout(canvas->foveation),
+        .finalLayout = getFoveationLayout(canvas->foveation)
       };
     }
 
@@ -2595,7 +2596,7 @@ void gpu_render_begin(gpu_stream* stream, gpu_canvas* canvas, gpu_timestamp_writ
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_FRAGMENT_DENSITY_MAP_CREATE_INFO_EXT,
         .fragmentDensityMapAttachment = {
           .attachment = attachmentCount - 1,
-          .layout = VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT
+          .layout = getFoveationLayout(canvas->foveation)
         }
       } : NULL,
       .attachmentCount = attachmentCount,
@@ -3322,6 +3323,11 @@ bool gpu_init(gpu_config* config) {
     VkPhysicalDeviceMultiviewProperties multiviewProperties = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES };
     VkPhysicalDeviceSubgroupProperties subgroupProperties = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES, .pNext = &multiviewProperties };
     VkPhysicalDeviceProperties2 properties2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &subgroupProperties };
+    VkPhysicalDeviceFragmentDensityMapPropertiesEXT fragmentDensityMapProperties = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_DENSITY_MAP_PROPERTIES_EXT };
+    if (state.extensions.foveation) {
+      fragmentDensityMapProperties.pNext = properties2.pNext;
+      properties2.pNext = &fragmentDensityMapProperties;
+    }
     vkGetPhysicalDeviceProperties2(state.adapter, &properties2);
 
     if (config->device) {
@@ -3345,6 +3351,8 @@ bool gpu_init(gpu_config* config) {
       config->limits->renderSize[0] = limits->maxFramebufferWidth;
       config->limits->renderSize[1] = limits->maxFramebufferHeight;
       config->limits->renderSize[2] = MAX(multiviewProperties.maxMultiviewViewCount, 1);
+      config->limits->foveationTexelSize[0] = state.extensions.foveation ? fragmentDensityMapProperties.minFragmentDensityTexelSize.width : 0;
+      config->limits->foveationTexelSize[1] = state.extensions.foveation ? fragmentDensityMapProperties.minFragmentDensityTexelSize.height : 0;
       config->limits->uniformBuffersPerStage = limits->maxPerStageDescriptorUniformBuffers;
       config->limits->storageBuffersPerStage = limits->maxPerStageDescriptorStorageBuffers;
       config->limits->sampledTexturesPerStage = limits->maxPerStageDescriptorSampledImages;
@@ -4568,6 +4576,12 @@ static VkImageLayout getNaturalLayout(uint32_t usage) {
   return VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
+// A density map that the CPU rewrites stays in the general layout that its copies use. A runtime's
+// density map arrives in the dedicated layout and is never transitioned out of it.
+static VkImageLayout getFoveationLayout(gpu_texture* texture) {
+  return texture->layout == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT;
+}
+
 static VkFormat convertFormat(gpu_texture_format format, int colorspace) {
   static const VkFormat formats[][2] = {
     [GPU_FORMAT_R8] = { VK_FORMAT_R8_UNORM, VK_FORMAT_R8_SRGB },
@@ -4684,6 +4698,7 @@ static VkPipelineStageFlags2 convertPhase(gpu_phase phase, bool dst) {
   if (phase & GPU_PHASE_CLEAR) flags |= VK_PIPELINE_STAGE_2_CLEAR_BIT_KHR;
   if (phase & GPU_PHASE_BLIT) flags |= VK_PIPELINE_STAGE_2_BLIT_BIT_KHR;
   if (phase & GPU_PHASE_TREE_BUILD) flags |= VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+  if (phase & GPU_PHASE_FRAGMENT_DENSITY) flags |= VK_PIPELINE_STAGE_2_FRAGMENT_DENSITY_PROCESS_BIT_EXT;
   return flags;
 }
 
@@ -4705,6 +4720,7 @@ static VkAccessFlags2 convertCache(gpu_cache cache) {
   if (cache & GPU_CACHE_TREE_INPUT) flags |= VK_ACCESS_2_SHADER_READ_BIT_KHR;
   if (cache & GPU_CACHE_TREE_READ) flags |= VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
   if (cache & GPU_CACHE_TREE_WRITE) flags |= VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+  if (cache & GPU_CACHE_FRAGMENT_DENSITY) flags |= VK_ACCESS_2_FRAGMENT_DENSITY_MAP_READ_BIT_EXT;
   return flags;
 }
 

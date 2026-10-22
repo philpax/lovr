@@ -9,6 +9,7 @@ static HmdMatrix34_t compose(const HmdMatrix34_t* head, const HmdMatrix34_t* eye
 static bool validTangents(const float* tangents);
 static void updateClock(OpenVRFrame* frame, OpenVRFrameSnapshot* snapshot);
 static double targetVsync(const OpenVRFrame* frame, double now, double period, double vsync);
+static uint32_t skippedRefreshes(double elapsed, double period);
 
 // A pose predicted further ahead extrapolates head motion past the point where it helps.
 #define MAX_COMPOSITES_AHEAD 3.
@@ -41,6 +42,7 @@ OpenVRFrameResult lovrOpenVRFrameUpdate(OpenVRFrame* frame, ETrackingUniverseOri
     memset(&frame->snapshot, 0, sizeof(frame->snapshot));
     return result;
   }
+  frame->stats.valid = false;
   OpenVRFrameSnapshot snapshot = { .origin = origin, .serial = ++frame->serial };
   ETrackedPropertyError error = ETrackedPropertyError_TrackedProp_Success;
   float frequency = system->GetFloatTrackedDeviceProperty(k_unTrackedDeviceIndex_Hmd,
@@ -131,6 +133,12 @@ OpenVRFrameResult lovrOpenVRFrameUpdate(OpenVRFrame* frame, ETrackingUniverseOri
   }
   updateClock(frame, &snapshot);
   frame->snapshot = snapshot;
+  frame->stats = (OpenVRFrameStats) {
+    .interval = frame->hasTarget ? now - frame->syncTime : 0.,
+    .prediction = snapshot.prediction,
+    .skipped = frame->hasTarget ? skippedRefreshes(target - frame->lastTarget, period) : 0,
+    .valid = true
+  };
   frame->syncTime = now;
   frame->hasSync = true;
   frame->lastTarget = target;
@@ -227,6 +235,12 @@ static HmdMatrix34_t compose(const HmdMatrix34_t* head, const HmdMatrix34_t* eye
     }
   }
   return result;
+}
+
+// Consecutive frames normally target consecutive refreshes; each further refresh shows the older frame again.
+static uint32_t skippedRefreshes(double elapsed, double period) {
+  double refreshes = round(elapsed / period);
+  return refreshes > 1. ? (uint32_t) fmin(refreshes - 1., UINT32_MAX) : 0;
 }
 
 static bool validTangents(const float* tangents) {

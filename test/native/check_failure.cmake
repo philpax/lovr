@@ -83,7 +83,9 @@ if(GPU_TESTS_ENABLED)
     headset.graphics.external.invalid headset.graphics.external.failures
     headset.graphics.external.callback-last-reference-release
     headset.graphics.external.arbitrary-texture-api-reentry-rejected headset.graphics.external.selective-quiescence
-    headset.graphics.external.callback-material-last-reference-release)
+    headset.graphics.external.callback-material-last-reference-release
+    headset.graphics.stereo.single-draw headset.graphics.stereo.multisampled
+    headset.graphics.stereo.density-maps headset.graphics.stereo.mono headset.graphics.stereo.discovery)
   list(APPEND expected_names headset.graphics.session.discovery
     headset.graphics.session.lua-boundary.checked headset.graphics.session.lua-boundary.unchecked)
   list(JOIN graphics_cases "\n" graphics_expected_output)
@@ -100,7 +102,7 @@ if(GPU_TESTS_ENABLED)
   endif()
 endif()
 if(OPENVR_ENABLED)
-  foreach(helper IN ITEMS frame projection events haptics)
+  foreach(helper IN ITEMS frame projection events haptics foveation)
     file(READ "${CMAKE_CURRENT_LIST_DIR}/openvr_${helper}.c" helper_source)
     string(REGEX MATCH "NativeTest[ \t\r\n]+tests\\[\\][ \t\r\n]*=[ \t\r\n]*\\{[^;]*\\};" helper_test_list "${helper_source}")
     string(REGEX MATCHALL "\\{[ \t\r\n]*\"[^\"]+\"[ \t\r\n]*," helper_case_entries "${helper_test_list}")
