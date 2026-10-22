@@ -585,6 +585,8 @@ endif()
 
 if(LOVR_USE_LUAU)
   target_compile_definitions(lovr PRIVATE LOVR_USE_LUAU)
+  target_sources(lovr PRIVATE src/api/luautable.cpp)
+  target_include_directories(lovr PRIVATE deps/luau/VM/src)
   if(LOVR_LUAU_CODEGEN)
     target_compile_definitions(lovr PRIVATE LOVR_LUAU_CODEGEN)
     target_sources(lovr PRIVATE src/api/codegen.cpp)

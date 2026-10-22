@@ -3,6 +3,9 @@
 #include "data/blob.h"
 #include "math/math.h"
 #include "util.h"
+#ifdef LOVR_USE_LUAU
+#include "luautable.h"
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -338,7 +341,16 @@ static bool luax_checkarray(lua_State* L, int index, int start, int count, const
       if (index < 0) index += lua_gettop(L) + 1;
       int n = typeComponents[array->type];
       count = MIN(count, (length - start + 1) / n);
-      for (int i = 0; i < count; i++, data += array->stride) {
+      int i = 0;
+#ifdef LOVR_USE_LUAU
+      // Flat float data is the common upload. Reading the array part directly avoids several API calls per value, and
+      // anything it cannot copy falls through to the general path below, which converts or reports it.
+      if (array->type == TYPE_F32 || array->type == TYPE_F32x2 || array->type == TYPE_F32x3 || array->type == TYPE_F32x4) {
+        i = luax_readfloats(L, index, start, count, n, array->stride, data);
+        data += (size_t) i * array->stride;
+      }
+#endif
+      for (; i < count; i++, data += array->stride) {
         for (int j = 0; j < n; j++) {
           lua_rawgeti(L, index, start + i * n + j);
         }
