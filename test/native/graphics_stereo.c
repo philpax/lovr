@@ -46,8 +46,11 @@
 
 typedef struct {
   gpu_canvas canvas;
-  gpu_timestamp_writes* beginTimestamps;
-  gpu_timestamp_writes* endTimestamps;
+  // Copies, because submission passes timestamp writes that live only for the duration of its call.
+  bool hasBeginTimestamps;
+  gpu_timestamp_writes beginTimestamps;
+  bool hasEndTimestamps;
+  gpu_timestamp_writes endTimestamps;
   bool ended;
   unsigned draws;
   unsigned pipelineBinds;
@@ -62,6 +65,10 @@ static bool insideRender;
 static unsigned graphicsPipelines;
 static gpu_pipeline_info lastPipelineInfo;
 static gpu_texture streamToken;
+
+static bool sameTimestamps(const gpu_timestamp_writes* a, const gpu_timestamp_writes* b) {
+  return a->tally == b->tally && a->beginIndex == b->beginIndex && a->endIndex == b->endIndex;
+}
 
 static RecordedPass* currentPass(void) {
   if (!insideRender || renderBegins == 0) abort();
@@ -109,14 +116,17 @@ bool gpu_pipeline_init_graphics(gpu_pipeline* pipeline, gpu_pipeline_info* info,
 void gpu_render_begin(gpu_stream* stream, gpu_canvas* canvas, gpu_timestamp_writes* timestamps) {
   (void) stream;
   if (insideRender || renderBegins >= MAX_RECORDED_PASSES) abort();
-  recorded[renderBegins++] = (RecordedPass) { .canvas = *canvas, .beginTimestamps = timestamps };
+  recorded[renderBegins] = (RecordedPass) { .canvas = *canvas, .hasBeginTimestamps = timestamps != NULL };
+  if (timestamps) recorded[renderBegins].beginTimestamps = *timestamps;
+  renderBegins++;
   insideRender = true;
 }
 void gpu_render_end(gpu_stream* stream, gpu_canvas* canvas, gpu_timestamp_writes* timestamps) {
   (void) stream;
   RecordedPass* pass = currentPass();
   if (canvas->color[0].texture != pass->canvas.color[0].texture || canvas->color[0].resolve != pass->canvas.color[0].resolve) abort();
-  pass->endTimestamps = timestamps;
+  pass->hasEndTimestamps = timestamps != NULL;
+  if (timestamps) pass->endTimestamps = *timestamps;
   pass->ended = true;
   insideRender = false;
 }
@@ -275,11 +285,11 @@ static bool singleDraw(void) {
   CHECK(graphicsPipelines == 1 && lastPipelineInfo.viewCount == 1 && !lastPipelineInfo.foveated);
 
   // Timing gives the render pass a tally, so the writes carry real indices.
-  CHECK(recorded[0].beginTimestamps && !recorded[0].endTimestamps);
-  CHECK(!recorded[1].beginTimestamps && recorded[1].endTimestamps);
-  CHECK(recorded[0].beginTimestamps == recorded[1].endTimestamps);
-  CHECK(recorded[1].endTimestamps->tally == state.timestamps && state.timestamps);
-  CHECK(recorded[1].endTimestamps->beginIndex == 0 && recorded[1].endTimestamps->endIndex == 1);
+  CHECK(recorded[0].hasBeginTimestamps && !recorded[0].hasEndTimestamps);
+  CHECK(!recorded[1].hasBeginTimestamps && recorded[1].hasEndTimestamps);
+  CHECK(sameTimestamps(&recorded[0].beginTimestamps, &recorded[1].endTimestamps));
+  CHECK(recorded[1].endTimestamps.tally == state.timestamps && state.timestamps);
+  CHECK(recorded[1].endTimestamps.beginIndex == 0 && recorded[1].endTimestamps.endIndex == 1);
 
   lovrRelease(pass, lovrPassDestroy);
   lovrRelease(left, lovrTextureDestroy);
@@ -392,7 +402,8 @@ static bool mono(void) {
     CHECK(renderBegins == 1 && recorded[0].ended);
     CHECK(recorded[0].canvas.color[0].texture == targets[t]->renderView);
     CHECK(recorded[0].draws == 1 && recorded[0].cameraOffset == 0);
-    CHECK(recorded[0].beginTimestamps && recorded[0].beginTimestamps == recorded[0].endTimestamps);
+    CHECK(recorded[0].hasBeginTimestamps && recorded[0].hasEndTimestamps);
+    CHECK(sameTimestamps(&recorded[0].beginTimestamps, &recorded[0].endTimestamps));
     CHECK(lastPipelineInfo.viewCount == t + 1);
     lovrRelease(pass, lovrPassDestroy);
   }
