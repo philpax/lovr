@@ -3,6 +3,9 @@
 #include <Luau/CodeGen.h>
 #include "lstate.h"
 #include <limits>
+#if defined(__linux__)
+#include <time.h>
+#endif
 #include <type_traits>
 
 using Luau::CodeGen::CodeGenCompilationResult;
@@ -128,4 +131,79 @@ int luax_codegenpromote(lua_State* L, size_t instructionBudget, LuauMetricsState
   metrics->hotFunctionsPromoted += stats.functionsBound;
   luax_recordcompile(metrics, stats, result);
   return int(stats.functionsBound);
+}
+
+// A promotion batch handed to a worker. The worker cannot touch the VM's metrics, so it records its own clocks for the bind to report.
+struct LuauHotJob {
+  Luau::CodeGen::HotBatch* batch;
+  uint64_t elapsedNs;
+  uint64_t cpuNs;
+  uint64_t takeElapsedNs;
+  uint64_t takeCpuNs;
+};
+
+// Clocks are read as the metrics bridge reads them, and report nothing where the platform lacks them.
+static bool luax_readclock(bool threadCpu, uint64_t* ns) {
+#if defined(__linux__)
+  struct timespec time;
+  if (clock_gettime(threadCpu ? CLOCK_THREAD_CPUTIME_ID : CLOCK_MONOTONIC, &time) != 0) return false;
+  *ns = (uint64_t) time.tv_sec * 1000000000 + time.tv_nsec;
+  return true;
+#else
+  (void) threadCpu;
+  (void) ns;
+  return false;
+#endif
+}
+
+void* luax_codegentakehot(lua_State* L, size_t instructionBudget, LuauMetricsState* state) {
+  if (Luau::CodeGen::getHotQueueSize(L) == 0) return nullptr;
+  LuauMetricsClock start = {};
+  if (state) start = luax_luaumetricsclock(&state->metrics);
+  Luau::CodeGen::HotBatch* batch = Luau::CodeGen::takeHot(L, instructionBudget);
+  if (!batch) return nullptr;
+  LuauHotJob* job = new LuauHotJob{batch, 0, 0, 0, 0};
+  if (state) luax_luaumetricselapsed(&state->metrics, start, &job->takeElapsedNs, &job->takeCpuNs);
+  return job;
+}
+
+void luax_codegencompilehot(void* opaque) {
+  LuauHotJob* job = static_cast<LuauHotJob*>(opaque);
+  uint64_t elapsedStart = 0, cpuStart = 0, elapsedEnd = 0, cpuEnd = 0;
+  bool elapsed = luax_readclock(false, &elapsedStart);
+  bool cpu = luax_readclock(true, &cpuStart);
+  Luau::CodeGen::compileHotBatch(job->batch);
+  if (elapsed && luax_readclock(false, &elapsedEnd)) job->elapsedNs = elapsedEnd - elapsedStart;
+  if (cpu && luax_readclock(true, &cpuEnd)) job->cpuNs = cpuEnd - cpuStart;
+}
+
+int luax_codegenbindhot(lua_State* L, void* opaque, LuauMetricsState* state) {
+  LuauHotJob* job = static_cast<LuauHotJob*>(opaque);
+  CompilationStats stats;
+  LuauMetricsClock start = {};
+  if (state) start = luax_luaumetricsclock(&state->metrics);
+  Luau::CodeGen::CompilationResult result = Luau::CodeGen::bindHotBatch(L, job->batch, &stats);
+  if (state) {
+    LuauMetrics* metrics = &state->metrics;
+    uint64_t bindElapsedNs = job->takeElapsedNs;
+    uint64_t bindCpuNs = job->takeCpuNs;
+    luax_luaumetricselapsed(metrics, start, &bindElapsedNs, &bindCpuNs);
+    metrics->hotBindElapsedNs += bindElapsedNs;
+    metrics->hotBindCpuNs += bindCpuNs;
+    metrics->nativeCompileElapsedNs += job->elapsedNs;
+    metrics->nativeCompileCpuNs += job->cpuNs;
+    metrics->hotPromotionElapsedNs += job->elapsedNs;
+    metrics->hotPromotionCpuNs += job->cpuNs;
+    metrics->hotPromotionCalls++;
+    metrics->hotFunctionsPromoted += stats.functionsBound;
+    luax_recordcompile(metrics, stats, result);
+  }
+  delete job;
+  return int(stats.functionsBound);
+}
+
+void luax_codegendiscardhot(lua_State* L, void* opaque) {
+  LuauHotJob* job = static_cast<LuauHotJob*>(opaque);
+  Luau::CodeGen::discardHotBatch(L, job->batch);
+  delete job;
 }

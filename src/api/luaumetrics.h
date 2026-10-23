@@ -45,6 +45,9 @@ typedef struct {
   uint64_t hotFunctionsPromoted;
   uint64_t hotPromotionElapsedNs;
   uint64_t hotPromotionCpuNs;
+  // The VM-thread share of promotion compiled on a worker: taking and binding batches. The worker's own time is in hotPromotion*.
+  uint64_t hotBindElapsedNs;
+  uint64_t hotBindCpuNs;
   // CodeGen callbacks report whole arena block reservations, not live executable code.
   uint64_t codegenReservedBytes;
   uint64_t codegenPeakReservedBytes;

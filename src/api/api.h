@@ -143,6 +143,14 @@ bool luax_setluautierup(lua_State* L, int threshold, int queueCapacity);
 // Returns the number of functions bound to native code, or -1 outside the tiered scope.
 int luax_promoteluau(lua_State* L, size_t instructionBudget);
 int luax_getluauhotqueuesize(lua_State* L);
+// Promotion with code generation on another thread. luax_takeluauhot dequeues hot functions as luax_promoteluau does and returns a job,
+// or NULL when nothing is queued or outside the tiered scope. luax_compileluauhot generates the job's code and touches no Lua state, so
+// one other thread may run it. luax_bindluauhot installs the code and frees the job, returning the functions bound, and
+// luax_discardluauhot frees a job without installing it. Both run on the Lua thread after compilation finishes, and before the state closes.
+void* luax_takeluauhot(lua_State* L, size_t instructionBudget);
+void luax_compileluauhot(void* job);
+int luax_bindluauhot(lua_State* L, void* job);
+void luax_discardluauhot(lua_State* L, void* job);
 // Returns false when metrics are disabled or out is NULL; leaves out unchanged on failure.
 bool luax_getluaumetrics(lua_State* L, LuauMetrics* out);
 void luax_compilefunction(lua_State* L, int index);

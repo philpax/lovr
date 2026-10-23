@@ -500,6 +500,35 @@ int luax_promoteluau(lua_State* L, size_t instructionBudget) {
 #endif
 }
 
+void* luax_takeluauhot(lua_State* L, size_t instructionBudget) {
+#if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
+  if (luax_getluauinteger(L, luauNativeScopeKey, LUAU_NATIVE_NONE) != LUAU_NATIVE_TIERED || !luax_hasluaucodegen(L)) return NULL;
+  return luax_codegentakehot(L, instructionBudget, luax_getluaumetricsstate(L));
+#else
+  return NULL;
+#endif
+}
+
+void luax_compileluauhot(void* job) {
+#if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
+  luax_codegencompilehot(job);
+#endif
+}
+
+int luax_bindluauhot(lua_State* L, void* job) {
+#if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
+  return luax_codegenbindhot(L, job, luax_getluaumetricsstate(L));
+#else
+  return 0;
+#endif
+}
+
+void luax_discardluauhot(lua_State* L, void* job) {
+#if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
+  luax_codegendiscardhot(L, job);
+#endif
+}
+
 int luax_getluauhotqueuesize(lua_State* L) {
 #if defined(LOVR_USE_LUAU) && defined(LOVR_LUAU_CODEGEN)
   return luax_hasluaucodegen(L) ? luax_codegenhotqueuesize(L) : 0;

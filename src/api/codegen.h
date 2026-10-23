@@ -30,6 +30,10 @@ void luax_codegencompile(lua_State* L, int index, int nativeScope, LuauMetricsSt
 bool luax_codegensettierup(lua_State* L, int threshold, int queueCapacity);
 int luax_codegenhotqueuesize(lua_State* L);
 int luax_codegenpromote(lua_State* L, size_t instructionBudget, LuauMetricsState* state);
+void* luax_codegentakehot(lua_State* L, size_t instructionBudget, LuauMetricsState* state);
+void luax_codegencompilehot(void* job);
+int luax_codegenbindhot(lua_State* L, void* job, LuauMetricsState* state);
+void luax_codegendiscardhot(lua_State* L, void* job);
 #endif
 
 #ifdef __cplusplus
