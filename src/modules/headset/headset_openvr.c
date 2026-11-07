@@ -65,7 +65,7 @@ static struct {
     Texture* output[SCENE_OUTPUTS][2];
     uint32_t outputSlot;
     Pass* pass;
-    Texture* foveation[2];
+    Texture* foveation;
     Image* foveationMap;
     Texture* overlay[2];
     Pass* overlayPass[2];
@@ -276,8 +276,8 @@ static bool retireScene(void) {
   for (unsigned slot = 0; slot < SCENE_OUTPUTS; slot++) {
     for (unsigned eye = 0; eye < 2; eye++) lovrGraphicsInvalidateSessionTexture(state.scene.output[slot][eye]);
   }
+  lovrGraphicsInvalidateSessionTexture(state.scene.foveation);
   for (unsigned eye = 0; eye < 2; eye++) {
-    lovrGraphicsInvalidateSessionTexture(state.scene.foveation[eye]);
     lovrGraphicsInvalidateSessionTexture(state.scene.overlay[eye]);
     lovrGraphicsInvalidateSessionPass(state.scene.overlayPass[eye]);
   }
@@ -286,8 +286,8 @@ static bool retireScene(void) {
   for (unsigned slot = 0; slot < SCENE_OUTPUTS; slot++) {
     for (unsigned eye = 0; eye < 2; eye++) lovrRelease(state.scene.output[slot][eye], lovrTextureDestroy);
   }
+  lovrRelease(state.scene.foveation, lovrTextureDestroy);
   for (unsigned eye = 0; eye < 2; eye++) {
-    lovrRelease(state.scene.foveation[eye], lovrTextureDestroy);
     lovrRelease(state.scene.overlay[eye], lovrTextureDestroy);
     lovrRelease(state.scene.overlayPass[eye], lovrPassDestroy);
   }
@@ -328,7 +328,7 @@ static void stop(void) {
   memset(&state.frame, 0, sizeof(state.frame));
   state.stopping = state.all != NULL || state.scene.projection.eyes[0] || state.scene.projection.eyes[1] ||
     state.scene.texture || hasSceneOutputs() || state.scene.pass ||
-    state.scene.foveation[0] || state.scene.foveation[1] || state.scene.overlay[0] || state.scene.overlay[1] ||
+    state.scene.foveation || state.scene.overlay[0] || state.scene.overlay[1] ||
     state.scene.overlayPass[0] || state.scene.overlayPass[1] || state.stopping;
   if (state.scene.projection.eyes[0] || state.scene.projection.eyes[1])
     projectionResult(lovrOpenVRProjectionHide(&state.scene.projection));
@@ -905,8 +905,7 @@ static bool modelPose(struct Model* model, float* position, float* orientation) 
 }
 static bool animate(struct Model* model) { (void) model; return false; }
 static Texture* background(uint32_t width, uint32_t height, uint32_t layers) { (void) width; (void) height; (void) layers; return NULL; }
-// Captures this frame's render state and makes sure every eye image exists. The array texture that
-// lovr.headset.getTexture returns exists only once an application asks for it.
+// Captures this frame's render state and makes sure every projection-eye image exists.
 static bool acquireScene(bool* ready) {
   *ready = false;
   lovrAssert(active(), "openvr: scene rendering requires an active session");
@@ -937,6 +936,10 @@ static bool acquireScene(bool* ready) {
       }
     }
   }
+  if (!state.scene.texture) {
+    state.scene.texture = newTexture(width, height, true);
+    if (!state.scene.texture) return false;
+  }
   *ready = true;
   return true;
 }
@@ -945,10 +948,6 @@ static bool sceneTexture(Texture** texture) {
   bool ready;
   if (!acquireScene(&ready)) return false;
   if (!ready) return true;
-  if (!state.scene.texture) {
-    state.scene.texture = newTexture(state.scene.render.width, state.scene.render.height, true);
-    if (!state.scene.texture) return false;
-  }
   *texture = state.scene.texture;
   state.scene.requested = true;
   return true;
@@ -1004,30 +1003,29 @@ static bool drawOverlay(Texture** outputs) {
   }
   return lovrGraphicsSubmit(passes, 2);
 }
-static bool prepareFoveation(Texture* foveation[2]) {
-  foveation[0] = foveation[1] = NULL;
+static bool prepareFoveation(Texture** foveation) {
+  *foveation = NULL;
   if (state.foveationLevel == FOVEATION_NONE) return true;
   uint32_t target[2] = { state.scene.render.width, state.scene.render.height };
   uint32_t texel[2], size[2];
   lovrAssert(lovrGraphicsGetFoveationTexelSize(texel) && lovrOpenVRFoveationMapSize(target, texel, size),
     "openvr: the foveation map has no valid size");
-  for (unsigned eye = 0; eye < 2; eye++) {
-    if (state.scene.foveation[eye]) continue;
+  if (!state.scene.foveation) {
     TextureInfo info = {
-      .type = TEXTURE_2D, .format = FORMAT_RG8,
-      .width = size[0], .height = size[1], .layers = 1, .mipmaps = 1, .samples = 1,
+      .type = TEXTURE_ARRAY, .format = FORMAT_RG8,
+      .width = size[0], .height = size[1], .layers = 2, .mipmaps = 1, .samples = 1,
       .usage = TEXTURE_FOVEATION | TEXTURE_TRANSFER,
       .label = "OpenVR foveation"
     };
-    state.scene.foveation[eye] = lovrTextureCreate(&info);
-    if (!state.scene.foveation[eye]) return false;
-    if (!lovrGraphicsRegisterSessionTexture(state.scene.foveation[eye])) {
-      lovrRelease(state.scene.foveation[eye], lovrTextureDestroy);
-      state.scene.foveation[eye] = NULL;
+    state.scene.foveation = lovrTextureCreate(&info);
+    if (!state.scene.foveation) return false;
+    if (!lovrGraphicsRegisterSessionTexture(state.scene.foveation)) {
+      lovrRelease(state.scene.foveation, lovrTextureDestroy);
+      state.scene.foveation = NULL;
       return false;
     }
   }
-  // Both eyes share one image, stacked vertically, and each half is copied into its eye's map.
+  // The CPU image stacks both eyes vertically; multiview selects the corresponding array layer.
   if (!state.scene.foveationMap) state.scene.foveationMap = lovrImageCreateRaw(size[0], 2 * size[1], FORMAT_RG8, false);
   if (!state.scene.foveationMap) return false;
   HmdVector2_t gaze[2] = { 0 };
@@ -1040,15 +1038,14 @@ static bool prepareFoveation(Texture* foveation[2]) {
     memcpy(view.tangents, state.scene.render.eyes[eye].tangents, sizeof(view.tangents));
     lovrAssert(lovrOpenVRFoveationFill(state.foveationLevel, &view, target, texel, size, texels + eye * stride),
       "openvr: the foveation map could not be filled");
-    uint32_t dstOffset[4] = { 0 };
+    uint32_t dstOffset[4] = { 0, 0, eye, 0 };
     uint32_t srcOffset[4] = { 0, eye * size[1], 0, 0 };
     uint32_t extent[3] = { size[0], size[1], 1 };
-    if (!lovrTextureSetPixels(state.scene.foveation[eye], state.scene.foveationMap, dstOffset, srcOffset, extent)) return false;
+    if (!lovrTextureSetPixels(state.scene.foveation, state.scene.foveationMap, dstOffset, srcOffset, extent)) return false;
     if (state.foveationOverlay && !prepareOverlay(eye, &view, target, texel, size, texels + eye * stride)) return false;
   }
   state.scene.overlaid = state.foveationOverlay;
-  foveation[0] = state.scene.foveation[0];
-  foveation[1] = state.scene.foveation[1];
+  *foveation = state.scene.foveation;
   return true;
 }
 static bool scenePass(Pass** pass) {
@@ -1069,12 +1066,11 @@ static bool scenePass(Pass** pass) {
   float clear[4][4] = { 0 };
   LoadAction loads[4] = { LOAD_CLEAR };
   if (!lovrPassSetClear(state.scene.pass, loads, clear, LOAD_CLEAR, 0.f)) return false;
-  // Each eye renders straight into the image that SteamVR receives, so submission copies nothing.
-  Texture** outputs = state.scene.output[state.scene.outputSlot];
-  Texture* foveation[2];
-  if (!prepareFoveation(foveation)) return false;
-  Canvas canvas = { .color[0].texture = outputs[0], .stereo = outputs[1], .foveation = foveation[0],
-    .stereoFoveation = foveation[1], .depthFormat = state.config.stencil ? FORMAT_D24S8 : FORMAT_D32F,
+  Texture* foveation;
+  if (!prepareFoveation(&foveation)) return false;
+  // Array multiview preserves the shader's view index as well as each eye's camera.
+  Canvas canvas = { .color[0].texture = state.scene.texture, .foveation = foveation,
+    .depthFormat = state.config.stencil ? FORMAT_D24S8 : FORMAT_D32F,
     .samples = state.config.antialias ? 4 : 1 };
   if (!lovrPassSetCanvas(state.scene.pass, &canvas)) return false;
   for (unsigned eye = 0; eye < 2; eye++) {
@@ -1117,9 +1113,8 @@ static bool abandonScene(void) {
 static bool submitScene(void) {
   OpenVRProjection* projection = &state.scene.projection;
   Texture** outputs = state.scene.output[state.scene.outputSlot];
-  // The scene pass draws into the eye images itself; only lovr.headset.getTexture's array needs copying.
   bool rendered = state.scene.prepared;
-  if (!state.main || !state.scene.requested || !state.scene.captured || (!rendered && !state.scene.texture) || !outputs[0] || !outputs[1] ||
+  if (!state.main || !state.scene.requested || !state.scene.captured || !state.scene.texture || !outputs[0] || !outputs[1] ||
       !state.scene.render.head.valid || !state.scene.render.eyes[0].pose.valid || !state.scene.render.eyes[1].pose.valid) {
     return !(projection->eyes[0] || projection->eyes[1]) || projectionResult(lovrOpenVRProjectionHide(projection));
   }
@@ -1151,8 +1146,11 @@ static bool submitScene(void) {
   uint32_t extent[3] = { state.scene.render.width, state.scene.render.height, 1 };
   for (unsigned eye = 0; eye < 2; eye++) {
     uint32_t source[4] = { 0, 0, eye, 0 }, target[4] = { 0 };
-    if (!rendered && !lovrTextureCopy(state.scene.texture, outputs[eye], source, target, extent)) return abandonScene();
-    if (rendered && state.scene.overlaid && eye == 0 && !drawOverlay(outputs)) return abandonScene();
+    if (!lovrTextureCopy(state.scene.texture, outputs[eye], source, target, extent)) return abandonScene();
+  }
+  // Both copies precede the diagnostic draws so the right-eye copy cannot overwrite its tint.
+  if (rendered && state.scene.overlaid && !drawOverlay(outputs)) return abandonScene();
+  for (unsigned eye = 0; eye < 2; eye++) {
     OpenVRProjectionHandoff handoff = { .projection = projection, .eye = eye };
     if (!lovrGraphicsHandoffTexture(outputs[eye], lovrOpenVRProjectionHandoff, &handoff, NULL)) {
       if (handoff.result.status != OPENVR_PROJECTION_OK) projectionResult(handoff.result);

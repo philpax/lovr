@@ -16,6 +16,17 @@
 #define gpu_stream_end unused_stream_end
 #define gpu_submit unused_submit
 #define os_get_time unused_get_time
+#define gpu_render_begin unused_render_begin
+#define gpu_render_end unused_render_end
+#define gpu_set_viewport unused_set_viewport
+#define gpu_set_scissor unused_set_scissor
+#define gpu_push_constants unused_push_constants
+#define gpu_bind_pipeline unused_bind_pipeline
+#define gpu_bind_bundles unused_bind_bundles
+#define gpu_bind_vertex_buffers unused_bind_vertex_buffers
+#define gpu_draw unused_draw
+#define gpu_pipeline_init_graphics unused_pipeline_init_graphics
+#define gpu_bundle_write unused_bundle_write
 #include "graphics_session.c"
 #undef main
 #undef gpu_copy_textures
@@ -26,6 +37,17 @@
 #undef gpu_stream_end
 #undef gpu_submit
 #undef os_get_time
+#undef gpu_render_begin
+#undef gpu_render_end
+#undef gpu_set_viewport
+#undef gpu_set_scissor
+#undef gpu_push_constants
+#undef gpu_bind_pipeline
+#undef gpu_bind_bundles
+#undef gpu_bind_vertex_buffers
+#undef gpu_draw
+#undef gpu_pipeline_init_graphics
+#undef gpu_bundle_write
 #include "../../src/modules/headset/openvr_frame.c"
 #include "headset/openvr_projection.h"
 #define result(...) projectionHelperResult(__VA_ARGS__)
@@ -61,8 +83,15 @@ static void checkRuntimeShutdown(void);
 #undef state
 
 static unsigned textureCreates;
+static gpu_texture_info temporaryColorInfo, temporaryDepthInfo;
 size_t gpu_sizeof_texture(void) { return sizeof(gpu_texture); }
-bool gpu_texture_init(gpu_texture* texture, gpu_texture_info* info) { (void) info; textureCreates++; *texture = (gpu_texture) { 0 }; return true; }
+bool gpu_texture_init(gpu_texture* texture, gpu_texture_info* info) {
+  if (info->format == GPU_FORMAT_D24S8) temporaryDepthInfo = *info;
+  if (info->format == GPU_FORMAT_RGBA8 && info->samples > 1) temporaryColorInfo = *info;
+  textureCreates++;
+  *texture = (gpu_texture) { 0 };
+  return true;
+}
 bool gpu_texture_init_view(gpu_texture* texture, gpu_texture_view_info* info) {
   if (!runtimeAlive || !info->source || info->source->destroyed) abort();
   *texture = (gpu_texture) { .view = true }; liveViews++; return true;
@@ -77,7 +106,7 @@ bool gpu_prepare_teardown(void) { return !prepareFails; }
 bool gpu_quiesce_locked(void) { return !prepareFails; }
 void gpu_flush_deferred(void) { deferredDestroys = 0; drainCalls++; }
 void gpu_flush_deferred_after_idle(void) { deferredDestroys = 0; drainCalls++; }
-bool lovrHeadsetIsActive(void) { return false; }
+bool lovrHeadsetIsActive(void) { return true; }
 double lovrHeadsetGetDisplayTime(void) { return 0.; }
 
 static unsigned frameWaits, graphicsEvent, overlayPolls;
@@ -98,6 +127,7 @@ static bool OPENVR_FNTABLE_CALLTYPE graphicsPoll(struct VREvent_t* event, uint32
 }
 static bool invalidTiming, fatalWait;
 static float sceneScale = 1.f;
+static uint32_t sceneSamples = 4;
 static uint32_t sceneWidth = 64, sceneHeight = 32;
 static double frameNow;
 static float framePhotons = .003f;
@@ -132,11 +162,12 @@ static bool OPENVR_FNTABLE_CALLTYPE runtimeFrameTiming(Compositor_FrameTiming* t
 }
 static struct VR_IVRCompositor_FnTable runtimeCompositor = { .GetFrameTiming = runtimeFrameTiming };
 static unsigned gazeQueries;
+static bool gazeTracked = true;
 static bool OPENVR_FNTABLE_CALLTYPE runtimeGaze(HmdVector2_t* left, HmdVector2_t* right) {
   gazeQueries++;
   *left = (HmdVector2_t) { { -.5f, .25f } };
   *right = (HmdVector2_t) { { .5f, .25f } };
-  return true;
+  return gazeTracked;
 }
 static struct VR_IVRSystem_FnTable runtimeSystem = { .GetFloatTrackedDeviceProperty = runtimeProperty,
   .GetTimeSinceLastVsync = runtimeVsync, .GetRecommendedRenderTargetSize = runtimeDimensions,
@@ -150,6 +181,74 @@ static uint32_t sceneCopiedEyes[2];
 static gpu_texture* sceneCopiedOutputs[2];
 static uintptr_t sceneHanded[2];
 static bool traceScene;
+static unsigned renderBegins, renderEnds, recordedDraws, cameraBinds, diagnosticDraws;
+static bool insideRender;
+static gpu_canvas recordedCanvas;
+static gpu_pipeline_info recordedPipeline;
+static Camera uploadedCameras[2];
+static uint32_t cameraOffset;
+
+bool gpu_pipeline_init_graphics(gpu_pipeline* pipeline, gpu_pipeline_info* info, bool* slow) {
+  (void) pipeline;
+  pipelineCreates++;
+  recordedPipeline = *info;
+  if (slow) *slow = false;
+  return true;
+}
+void gpu_bundle_write(gpu_bundle** bundles, gpu_bundle_info* info, uint32_t count) {
+  unused_bundle_write(bundles, info, count);
+  for (uint32_t i = 0; i < count; i++) {
+    for (uint32_t j = 0; j < info[i].count; j++) {
+      gpu_binding* binding = &info[i].bindings[j];
+      if (binding->number == 1 && binding->type == GPU_SLOT_UNIFORM_BUFFER_DYNAMIC) {
+        memcpy(uploadedCameras, (char*) binding->buffer.object->pointer + binding->buffer.offset, sizeof(uploadedCameras));
+      }
+    }
+  }
+}
+void gpu_render_begin(gpu_stream* stream, gpu_canvas* canvas, gpu_timestamp_writes* timestamps) {
+  (void) stream; (void) timestamps;
+  if (insideRender) abort();
+  recordedCanvas = *canvas;
+  renderBegins++;
+  insideRender = true;
+}
+void gpu_render_end(gpu_stream* stream, gpu_canvas* canvas, gpu_timestamp_writes* timestamps) {
+  (void) stream; (void) canvas; (void) timestamps;
+  if (!insideRender) abort();
+  renderEnds++;
+  insideRender = false;
+}
+void gpu_set_viewport(gpu_stream* stream, float viewport[4], float depthRange[2]) { (void) stream; (void) viewport; (void) depthRange; }
+void gpu_set_scissor(gpu_stream* stream, uint32_t scissor[4]) { (void) stream; (void) scissor; }
+void gpu_push_constants(gpu_stream* stream, gpu_shader* shader, void* data, uint32_t size) { (void) stream; (void) shader; (void) data; (void) size; }
+void gpu_bind_pipeline(gpu_stream* stream, gpu_pipeline* pipeline, gpu_pipeline_type type) {
+  (void) stream; (void) pipeline;
+  if (!insideRender || type != GPU_PIPELINE_GRAPHICS) abort();
+}
+void gpu_bind_bundles(gpu_stream* stream, gpu_shader* shader, gpu_bundle** bundles, uint32_t first, uint32_t count, uint32_t* offsets, uint32_t offsetCount) {
+  (void) stream; (void) shader; (void) bundles; (void) count;
+  if (!insideRender) abort();
+  if (first == 0) {
+    if (offsetCount != 2) abort();
+    cameraOffset = offsets[0];
+    cameraBinds++;
+  }
+}
+void gpu_bind_vertex_buffers(gpu_stream* stream, gpu_buffer** buffers, uint32_t* offsets, uint32_t first, uint32_t count) {
+  (void) stream; (void) buffers; (void) offsets; (void) first; (void) count;
+  if (!insideRender) abort();
+}
+void gpu_draw(gpu_stream* stream, uint32_t vertices, uint32_t instances, uint32_t first, uint32_t baseInstance) {
+  (void) stream; (void) instances; (void) first; (void) baseInstance;
+  if (!insideRender || vertices != 3) abort();
+  recordedDraws++;
+  if (recordedCanvas.color[0].texture != vrState.scene.texture->renderView && !recordedCanvas.color[0].resolve) {
+    if (sceneCopies != 2 || sceneSubmissions || diagnosticDraws >= 2 ||
+        recordedCanvas.color[0].texture != vrState.scene.output[vrState.scene.outputSlot][diagnosticDraws]->renderView) abort();
+    diagnosticDraws++;
+  }
+}
 
 void gpu_copy_textures(gpu_stream* stream, gpu_texture* src, gpu_texture* dst, uint32_t source[4], uint32_t target[4], uint32_t extent[3]) {
   (void) stream;
@@ -157,23 +256,53 @@ void gpu_copy_textures(gpu_stream* stream, gpu_texture* src, gpu_texture* dst, u
     if (source[2] || target[2] || extent[0] != 64 || extent[1] != 32 || extent[2] != 1) abort();
     panelCopies++; return;
   }
-  if (!traceScene || sceneCopies >= 2 || src != vrState.scene.texture->gpu || dst != vrState.scene.output[vrState.scene.outputSlot][source[2]]->gpu ||
+  if (!traceScene || source[2] >= 2 || sceneCopies >= 2 || sceneSubmissions || src != vrState.scene.texture->gpu || dst != vrState.scene.output[vrState.scene.outputSlot][source[2]]->gpu ||
       source[0] || source[1] || source[3] || target[0] || target[1] || target[2] || target[3] ||
       extent[0] != sceneWidth || extent[1] != sceneHeight || extent[2] != 1) abort();
   sceneCopiedEyes[sceneCopies] = source[2];
   sceneCopiedOutputs[sceneCopies++] = dst;
 }
-// Only the foveation map writes through an upload buffer, which submission flushes.
-void gpu_buffer_flush(gpu_buffer* buffer, uint32_t offset, uint32_t extent) { (void) buffer; (void) offset; (void) extent; }
-static unsigned foveationUploads;
+typedef struct {
+  gpu_buffer* buffer;
+  uint32_t offset, pitch, width, height, eye, bytes;
+} RecordedUpload;
+static RecordedUpload uploads[4];
+static unsigned uploadCount, foveationUploads;
 static uint32_t foveationEyes[2];
+
+// SetPixels records the GPU copy before filling its buffer, so bytes are checked when submission flushes it.
+void gpu_buffer_flush(gpu_buffer* buffer, uint32_t offset, uint32_t extent) {
+  (void) offset; (void) extent;
+  unsigned pending = 0;
+  for (unsigned i = 0; i < uploadCount; i++) {
+    RecordedUpload upload = uploads[i];
+    if (upload.buffer != buffer) { uploads[pending++] = upload; continue; }
+    Image* image = upload.bytes == OPENVR_FOVEATION_TEXEL_BYTES ? vrState.scene.foveationMap : vrState.scene.overlayImage;
+    uint8_t* pixels = lovrImageGetLayerData(image, 0, 0);
+    for (uint32_t y = 0; y < upload.height; y++) {
+      uint8_t* source = pixels + ((upload.eye * upload.height + y) * upload.width) * upload.bytes;
+      uint8_t* target = (uint8_t*) buffer->pointer + upload.offset + y * upload.pitch * upload.bytes;
+      if (memcmp(source, target, upload.width * upload.bytes)) abort();
+    }
+  }
+  uploadCount = pending;
+}
 void gpu_copy_buffer_texture(gpu_stream* stream, gpu_buffer* src, gpu_texture* dst, uint32_t srcOffset, uint32_t dstOffset[4], uint32_t extent[3], uint32_t texelsPerRow) {
-  (void) stream; (void) src; (void) srcOffset; (void) texelsPerRow;
-  Texture** maps = vrState.scene.foveation;
-  uint32_t eye = maps[1] && dst == maps[1]->gpu;
-  if (!maps[eye] || dst != maps[eye]->gpu || foveationUploads >= 2 || dstOffset[0] || dstOffset[1] || dstOffset[2] ||
-      dstOffset[3] || extent[0] != maps[eye]->info.width || extent[1] != maps[eye]->info.height || extent[2] != 1) abort();
-  foveationEyes[foveationUploads++] = eye;
+  (void) stream;
+  Texture* map = vrState.scene.foveation;
+  unsigned eye = dstOffset[2], bytes = OPENVR_FOVEATION_TEXEL_BYTES;
+  if (map && dst == map->gpu) {
+    if (foveationUploads >= 2 || dstOffset[0] || dstOffset[1] || dstOffset[2] >= 2 || dstOffset[3] ||
+        extent[0] != map->info.width || extent[1] != map->info.height || extent[2] != 1) abort();
+    foveationEyes[foveationUploads++] = dstOffset[2];
+  } else {
+    eye = vrState.scene.overlay[1] && dst == vrState.scene.overlay[1]->gpu;
+    bytes = OPENVR_FOVEATION_OVERLAY_BYTES;
+    if (!map || !vrState.scene.overlay[eye] || dst != vrState.scene.overlay[eye]->gpu || dstOffset[0] || dstOffset[1] || dstOffset[2] || dstOffset[3] ||
+        extent[0] != map->info.width || extent[1] != map->info.height || extent[2] != 1) abort();
+  }
+  if (uploadCount >= COUNTOF(uploads)) abort();
+  uploads[uploadCount++] = (RecordedUpload) { src, srcOffset, texelsPerRow, extent[0], extent[1], eye, bytes };
 }
 void gpu_sync(gpu_stream* stream, gpu_barrier* barriers, uint32_t count) { (void) stream; (void) barriers; (void) count; }
 gpu_stream* gpu_stream_begin(const char* label) { (void) label; return (gpu_stream*) 1; }
@@ -195,6 +324,7 @@ static bool runtimeHideFails, runtimeDestroyFails;
 static unsigned runtimeDestroyCalls, runtimeHideCalls, shutdownDrainBaseline;
 static unsigned projectionCreates, failProjectionCreate, runtimeCreates;
 static bool projectionMode, failSceneConfigure, failSceneHandoff, failSceneShow, failSceneHide, failPanelHide;
+static unsigned failSceneHandoffEye;
 static bool panelVisible, showAttempted;
 static unsigned sceneHideCalls, runtimeShowCalls, runtimeFlagCalls;
 static HmdMatrix34_t submittedPoses[2];
@@ -271,14 +401,16 @@ static EVROverlayError OPENVR_FNTABLE_CALLTYPE runtimeTexture(VROverlayHandle_t 
   unsigned eye = sceneSubmissions++;
   bool unlocked = mtx_trylock(&state.lock) == thrd_success;
   if (unlocked) mtx_unlock(&state.lock);
-  if (unlocked || !externalHandoff || eye >= 2 || handle != 81 + eye ||
+  if (unlocked || !externalHandoff || sceneCopies != 2 ||
+      (vrState.scene.prepared && vrState.scene.overlaid && diagnosticDraws != 2) || eye >= 2 || handle != 81 + eye ||
       texture->eType != ETextureType_TextureType_Vulkan || texture->eColorSpace != EColorSpace_ColorSpace_Gamma ||
       image->m_nImage != (uintptr_t) vrState.scene.output[vrState.scene.outputSlot][eye]->gpu || image->m_nWidth != sceneWidth || image->m_nHeight != sceneHeight ||
       image->m_nFormat != VK_FORMAT_R8G8B8A8_SRGB || image->m_nSampleCount != 1 ||
       (uintptr_t) image->m_pInstance != 1 || (uintptr_t) image->m_pPhysicalDevice != 2 ||
       (uintptr_t) image->m_pDevice != 3 || (uintptr_t) image->m_pQueue != 4 || image->m_nQueueFamilyIndex != 5) abort();
+  if (failSceneHandoff && eye == failSceneHandoffEye) return EVROverlayError_VROverlayError_RequestFailed;
   sceneHanded[eye] = image->m_nImage;
-  return failSceneHandoff ? EVROverlayError_VROverlayError_RequestFailed : EVROverlayError_VROverlayError_None;
+  return EVROverlayError_VROverlayError_None;
 }
 static struct VR_IVROverlay_FnTable runtimeAPI = {
   .CreateOverlay = runtimeCreate, .DestroyOverlay = runtimeDestroy, .HideOverlay = runtimeHide, .ShowOverlay = runtimeShow,
@@ -458,7 +590,7 @@ static bool sceneCanvas(void) {
   projectionCreates = failProjectionCreate = sceneCopies = sceneSubmissions = 0;
   prepareFails = runtimeHideFails = runtimeDestroyFails = false;
   memset(&vrState, 0, sizeof(vrState));
-  HeadsetConfig config = { .overlay = true, .stencil = true, .antialias = true, .supersample = 1.f };
+  HeadsetConfig config = { .overlay = true, .stencil = true, .antialias = sceneSamples > 1, .supersample = 1.f };
   CHECK(init(&config) && connect() && start());
   vrState.runtime.overlay = &runtimeAPI;
   Texture* probe = rootTexture();
@@ -514,16 +646,19 @@ static bool sceneCanvas(void) {
   }
   OpenVRFrameSnapshot captured = *frame;
   Pass* pass;
-  CHECK(scenePass(&pass) && pass && pass->views == 2 && pass->canvas.samples == 4);
-  CHECK(pass->tempDepth && pass->tempColor[0] && pass->canvas.depthFormat == FORMAT_D24S8);
-  // Each eye renders straight into the image that SteamVR receives.
+  CHECK(scenePass(&pass) && pass && pass->views == 2 && pass->canvas.samples == sceneSamples);
+  CHECK(pass->pipeline->info.viewCount == 2 && !pass->canvas.stereo);
+  CHECK(pass->tempDepth && pass->tempColor[0] == (sceneSamples > 1) && pass->canvas.depthFormat == FORMAT_D24S8);
   Texture** outputs = vrState.scene.output[vrState.scene.outputSlot];
-  CHECK(pass->canvas.color[0].texture == outputs[0] && pass->canvas.stereo == outputs[1]);
-  CHECK(pass->target.color[0].resolve == outputs[0]->renderView && !vrState.scene.texture);
-  CHECK(pass->target.color[0].clear[3] == 0.f && pass->target.depth.clear == 0.f);
   Texture* root;
   CHECK(sceneTexture(&root) && root && root->info.type == TEXTURE_ARRAY && root->info.layers == 2);
-  CHECK(root == vrState.scene.texture && root->info.samples == 1);
+  CHECK(root == vrState.scene.texture && root->info.samples == 1 && root->ref == 2);
+  CHECK(temporaryDepthInfo.type == GPU_TEXTURE_ARRAY && temporaryDepthInfo.size[2] == 2 && temporaryDepthInfo.samples == sceneSamples);
+  if (sceneSamples > 1) CHECK(temporaryColorInfo.type == GPU_TEXTURE_ARRAY && temporaryColorInfo.size[2] == 2 && temporaryColorInfo.samples == sceneSamples);
+  CHECK(pass->canvas.color[0].texture == root && !pass->canvas.stereo);
+  CHECK(sceneSamples > 1 ? pass->target.color[0].resolve == root->renderView :
+    pass->target.color[0].texture == root->renderView && !pass->target.color[0].resolve);
+  CHECK(pass->target.color[0].clear[3] == 0.f && pass->target.depth.clear == 0.f);
   for (unsigned eye = 0; eye < 2; eye++) {
     for (unsigned slot = 0; slot < SCENE_OUTPUTS; slot++) {
       Texture* output = vrState.scene.output[slot][eye];
@@ -568,13 +703,49 @@ static bool sceneCanvas(void) {
   initAllocator(&thread.stack);
   state.stream = (gpu_stream*) 1;
   state.barrier = (gpu_barrier) { 0 };
+  state.limits.vertexBufferStride = 64;
+  Layout builtin = { 0 }, materialLayout = { 0 };
+  Sampler sampler = { 0 };
+  CHECK(mtx_init(&builtin.lock, mtx_plain) == thrd_success);
+  state.tick = 1;
+  state.limits.uniformBufferAlign = 16;
+  state.materialLayout = &materialLayout;
+  state.builtinLayout = &builtin;
+  state.defaultSamplers[FILTER_LINEAR] = &sampler;
+  state.defaultTexture = rootTexture();
+  state.features.sampleCounts = 1 | 4;
+  state.defaultBuffer = lovrBufferCreate(&(BufferInfo) { .size = 16 }, NULL);
+  state.defaultMaterial = lovrMaterialCreate(NULL);
+  CHECK(state.defaultBuffer && state.defaultMaterial);
+  ShaderSource stages[] = {
+    lovrGraphicsGetDefaultShaderSource(SHADER_UNLIT, STAGE_VERTEX),
+    lovrGraphicsGetDefaultShaderSource(SHADER_UNLIT, STAGE_FRAGMENT)
+  };
+  ShaderInfo shaderInfo = { .type = SHADER_GRAPHICS, .stages = stages, .stageCount = 2, .isDefault = true };
+  Shader* shader = lovrShaderCreate(&shaderInfo);
+  CHECK(shader);
+  lovrPassSetShader(pass, shader);
+  CHECK(lovrPassDraw(pass, &(DrawInfo) { .mode = DRAW_TRIANGLES, .vertex.format = VERTEX_EMPTY, .count = 3 }));
+  CHECK(pass->cameraCount == 1 && pass->drawCount == 1 && pass->draws[0].pipelineInfo->viewCount == 2);
+  Camera cameras[2];
+  memcpy(cameras, pass->cameras, sizeof(cameras));
+  CHECK(memcmp(cameras[0].viewMatrix, cameras[1].viewMatrix, sizeof(cameras[0].viewMatrix)));
+  CHECK(memcmp(cameras[0].projection, cameras[1].projection, sizeof(cameras[0].projection)));
+  renderBegins = renderEnds = recordedDraws = cameraBinds = 0;
+  CHECK(lovrGraphicsSubmit(&pass, 1));
+  CHECK(renderBegins == 1 && renderEnds == 1 && recordedDraws == 1 && cameraBinds == 1 && cameraOffset == 0);
+  CHECK(sceneSamples > 1 ? recordedCanvas.color[0].resolve == root->renderView :
+    recordedCanvas.color[0].texture == root->renderView && !recordedCanvas.color[0].resolve);
+  CHECK(recordedCanvas.depth.texture == pass->target.depth.texture);
+  CHECK(recordedPipeline.viewCount == 2 && recordedPipeline.multisample.count == sceneSamples && !recordedPipeline.foveated);
+  CHECK(!memcmp(uploadedCameras, pass->cameras, sizeof(cameras)));
   LayerInfo panelInfo = { .width = 64, .height = 32, .filter = true, .transparent = true };
   Layer* panel = layerCreate(&panelInfo);
   CHECK(panel && layerPass(panel));
   panelCopies = panelSubmissions = 0;
   CHECK(setLayers(&panel, 1, true) && submit());
   CHECK(panelCopies == 1 && panelSubmissions == 1);
-  CHECK(sceneCopies == 0 && sceneSubmissions == 2);
+  CHECK(sceneCopies == 2 && sceneSubmissions == 2 && sceneCopiedEyes[0] == 0 && sceneCopiedEyes[1] == 1);
   CHECK(sceneHanded[0] == (uintptr_t) outputs[0]->gpu && sceneHanded[1] == (uintptr_t) outputs[1]->gpu);
   for (unsigned eye = 0; eye < 2; eye++) {
     // The overlay receives the view matrix that renders the eye, and the frustum with its downward edge in fTop.
@@ -602,8 +773,8 @@ static bool sceneCanvas(void) {
   for (unsigned i = 0; i < 4; i++) {
     sceneCopies = sceneSubmissions = panelCopies = panelSubmissions = 0;
     CHECK(update() && scenePass(&repeated) && repeated == pass);
-    CHECK(pass->canvas.color[0].texture == vrState.scene.output[vrState.scene.outputSlot][0]);
-    CHECK(submit() && sceneCopies == 0 && sceneSubmissions == 2);
+    CHECK(pass->canvas.color[0].texture == root && !pass->canvas.stereo);
+    CHECK(submit() && sceneCopies == 2 && sceneSubmissions == 2);
     memcpy(handed[i], sceneHanded, sizeof(handed[i]));
   }
   for (unsigned i = 0; i < 3; i++) {
@@ -612,10 +783,42 @@ static bool sceneCanvas(void) {
   CHECK(handed[3][0] == handed[0][0] && handed[3][1] == handed[0][1]);
   // A frame drawn through lovr.headset.getTexture still reaches SteamVR, by copying each layer of the array.
   sceneCopies = sceneSubmissions = 0;
-  CHECK(update() && sceneTexture(&root) && root == vrState.scene.texture);
+  CHECK(update() && sceneTexture(&root) && root == vrState.scene.texture && root->ref == 2);
+  CHECK(!vrState.scene.prepared);
   CHECK(submit() && sceneCopies == 2 && sceneSubmissions == 2 && sceneCopiedEyes[0] == 0 && sceneCopiedEyes[1] == 1);
   CHECK(sceneCopiedOutputs[0] != sceneCopiedOutputs[1]);
+  for (unsigned eye = 0; eye < 2; eye++) {
+    unsigned slot = vrState.scene.outputSlot, hidden = sceneHideCalls;
+    Texture* output = vrState.scene.output[slot][eye];
+    output->info.usage &= ~TEXTURE_TRANSFER;
+    sceneCopies = sceneSubmissions = 0;
+    CHECK(!submit() && sceneCopies == eye && !sceneSubmissions && vrState.scene.outputSlot == slot);
+    CHECK(sceneHideCalls == hidden + 2 && strstr(lovrGetError(), "transfer") && strstr(lovrGetError(), "rollback"));
+    CHECK(!vrState.scene.projection.visible[0] && !vrState.scene.projection.visible[1]);
+    output->info.usage |= TEXTURE_TRANSFER;
+    sceneCopies = sceneSubmissions = panelCopies = panelSubmissions = 0;
+    CHECK(submit() && sceneCopies == 2 && sceneSubmissions == 2);
+  }
   CHECK(setLayers(NULL, 0, true));
+  unsigned handoffSlot = vrState.scene.outputSlot, handoffHides = sceneHideCalls;
+  Texture** handoffOutputs = vrState.scene.output[handoffSlot];
+  sceneHanded[0] = sceneHanded[1] = 0;
+  failSceneHandoff = true; failSceneHandoffEye = 1; failSceneHide = true; showAttempted = true;
+  sceneCopies = sceneSubmissions = 0;
+  CHECK(!submit() && sceneCopies == 2 && sceneSubmissions == 2);
+  CHECK(sceneHanded[0] == (uintptr_t) handoffOutputs[0]->gpu && !sceneHanded[1]);
+  CHECK(vrState.scene.outputSlot == handoffSlot && sceneHideCalls == handoffHides + 2);
+  CHECK(!vrState.scene.projection.visible[0] && !vrState.scene.projection.visible[1]);
+  CHECK(strstr(lovrGetError(), "SetOverlayTexture") && strstr(lovrGetError(), "eye 1") && strstr(lovrGetError(), "HideOverlay"));
+  CHECK(lovrTextureIsValid(root) && lovrPassIsValid(pass) &&
+    lovrTextureIsValid(handoffOutputs[0]) && lovrTextureIsValid(handoffOutputs[1]));
+  failSceneHandoff = failSceneHide = showAttempted = false;
+  sceneHanded[0] = sceneHanded[1] = 0;
+  sceneCopies = sceneSubmissions = 0;
+  CHECK(submit() && sceneCopies == 2 && sceneSubmissions == 2);
+  CHECK(sceneHanded[0] == (uintptr_t) handoffOutputs[0]->gpu && sceneHanded[1] == (uintptr_t) handoffOutputs[1]->gpu);
+  CHECK(vrState.scene.outputSlot == (handoffSlot + 1) % SCENE_OUTPUTS);
+  CHECK(vrState.scene.projection.visible[0] && vrState.scene.projection.visible[1]);
   // An unchanged pose is not reapplied, so the eye moves to make the transform call fail.
   vrState.scene.render.eyes[0].transform.m[0][3] += .01f;
   failSceneConfigure = true;
@@ -625,7 +828,7 @@ static bool sceneCanvas(void) {
   sceneCopies = sceneSubmissions = 0;
   CHECK(setLayers(&panel, 1, true) && submit() && panelVisible);
   CHECK(setLayers(NULL, 0, true));
-  failSceneHandoff = true; failPanelHide = true;
+  failSceneHandoff = true; failSceneHandoffEye = 0; failPanelHide = true;
   sceneCopies = sceneSubmissions = 0;
   CHECK(!submit() && panelVisible && strstr(lovrGetError(), "SetOverlayTexture") && strstr(lovrGetError(), "omitted panel"));
   failPanelHide = false;
@@ -695,26 +898,61 @@ static bool sceneCanvas(void) {
   CHECK(setFoveationOverlay(true) && getFoveationOverlay() && setFoveationOverlay(false) && !getFoveationOverlay());
   sceneCopies = sceneSubmissions = 0;
   CHECK(update() && scenePass(&repeated) && repeated == pass);
-  Texture** maps = vrState.scene.foveation;
-  CHECK(maps[0] && maps[1] && pass->canvas.foveation == maps[0] && pass->canvas.stereoFoveation == maps[1]);
-  CHECK(pass->target.foveation == maps[0]->gpu);
-  for (unsigned eye = 0; eye < 2; eye++) {
-    CHECK(maps[eye]->info.type == TEXTURE_2D && maps[eye]->info.format == FORMAT_RG8 && maps[eye]->info.layers == 1);
-    CHECK(maps[eye]->info.width == (sceneWidth + 15) / 16 && maps[eye]->info.height == (sceneHeight + 15) / 16);
-  }
+  Texture* map = vrState.scene.foveation;
+  CHECK(map && pass->canvas.foveation == map && !pass->canvas.stereoFoveation && !pass->canvas.stereo);
+  CHECK(pass->target.foveation == map->gpu && pass->pipeline->info.viewCount == 2 && pass->pipeline->info.foveated);
+  CHECK(map->info.type == TEXTURE_ARRAY && map->info.format == FORMAT_RG8 && map->info.layers == 2 && map->ref == 2);
+  CHECK(map->info.width == (sceneWidth + 15) / 16 && map->info.height == (sceneHeight + 15) / 16);
   CHECK(foveationUploads == 2 && foveationEyes[0] == 0 && foveationEyes[1] == 1 && gazeQueries == 1);
   CHECK(submit() && sceneSubmissions == 2);
   foveationUploads = 0;
   sceneCopies = sceneSubmissions = 0;
-  CHECK(update() && scenePass(&repeated) && pass->canvas.foveation == maps[0] && foveationUploads == 2 && gazeQueries == 2);
+  CHECK(update() && scenePass(&repeated) && pass->canvas.foveation == map && foveationUploads == 2 && gazeQueries == 2);
   CHECK(submit());
+  for (unsigned tracked = 0; tracked < 2; tracked++) {
+    gazeTracked = tracked != 0;
+    for (FoveationLevel requested = FOVEATION_LOW; requested <= FOVEATION_HIGH; requested++) {
+      CHECK(setFoveation(requested, tracked != 0));
+      getFoveation(&level, &dynamic);
+      CHECK(level == requested && dynamic == (tracked != 0));
+      CHECK(setFoveationOverlay(true));
+      foveationUploads = diagnosticDraws = 0;
+      sceneCopies = sceneSubmissions = 0;
+      CHECK(update() && scenePass(&repeated) && repeated == pass && pass->canvas.foveation == map);
+      CHECK(pass->views == 2 && !pass->canvas.stereo && pass->canvas.samples == sceneSamples);
+      CHECK(foveationUploads == 2 && foveationEyes[0] == 0 && foveationEyes[1] == 1);
+      uint32_t target[2] = { sceneWidth, sceneHeight }, texel[2] = { 16, 16 }, size[2] = { map->info.width, map->info.height };
+      size_t stride = (size_t) size[0] * size[1] * OPENVR_FOVEATION_TEXEL_BYTES;
+      uint8_t* pixels = lovrImageGetLayerData(vrState.scene.foveationMap, 0, 0);
+      uint8_t* expected = lovrMalloc(stride);
+      for (unsigned eye = 0; eye < 2; eye++) {
+        OpenVRFoveationEye view = { .gaze = { eye ? .5f : -.5f, .25f }, .tracked = gazeTracked };
+        memcpy(view.tangents, vrState.scene.render.eyes[eye].tangents, sizeof(view.tangents));
+        CHECK(lovrOpenVRFoveationFill(requested, &view, target, texel, size, expected));
+        CHECK(!memcmp(expected, pixels + eye * stride, stride));
+      }
+      lovrFree(expected);
+      if (tracked) CHECK(memcmp(pixels, pixels + stride, stride));
+      lovrPassSetShader(pass, shader);
+      CHECK(lovrPassDraw(pass, &(DrawInfo) { .mode = DRAW_TRIANGLES, .vertex.format = VERTEX_EMPTY, .count = 3 }));
+      renderBegins = renderEnds = recordedDraws = cameraBinds = 0;
+      CHECK(lovrGraphicsSubmit(&pass, 1));
+      CHECK(renderBegins == 1 && renderEnds == 1 && recordedDraws == 1 && cameraBinds == 1 && cameraOffset == 0);
+      CHECK(recordedCanvas.foveation == map->gpu && pass->draws[0].pipelineInfo->viewCount == 2);
+      CHECK(pass->draws[0].pipelineInfo->foveated && pass->draws[0].pipelineInfo->multisample.count == sceneSamples);
+      CHECK(submit() && sceneCopies == 2 && sceneSubmissions == 2 && diagnosticDraws == 2);
+      CHECK(!uploadCount && setFoveationOverlay(false));
+    }
+  }
+  gazeTracked = true;
+  unsigned queries = gazeQueries;
   CHECK(setFoveation(FOVEATION_NONE, true));
   getFoveation(&level, &dynamic);
   CHECK(level == FOVEATION_NONE && !dynamic);
   foveationUploads = 0;
   sceneCopies = sceneSubmissions = 0;
   CHECK(update() && scenePass(&repeated) && !pass->canvas.foveation && !pass->canvas.stereoFoveation && !pass->target.foveation);
-  CHECK(foveationUploads == 0 && gazeQueries == 2 && submit());
+  CHECK(foveationUploads == 0 && gazeQueries == queries && submit());
   for (unsigned failure = 0; failure < 2; failure++) {
     activeInputPose = true;
     CHECK(update() && vibrate(DEVICE_HAND_LEFT, .5f, 1.f, 120.f));
@@ -825,6 +1063,41 @@ static bool sceneCanvas(void) {
   runtimeDestroyFails = false;
   CHECK(disconnect() && !vrState.scene.texture && !vrState.scene.projection.eyes[0]);
   CHECK(!sessionTextures && !sessionPasses && !deferredDestroys);
+  lovrRelease(shader, lovrShaderDestroy);
+  for (size_t i = 0; i < COUNTOF(state.defaultShaders); i++) {
+    lovrRelease(state.defaultShaders[i], lovrShaderDestroy);
+    state.defaultShaders[i] = NULL;
+  }
+  lovrRelease(state.defaultMaterial, lovrMaterialDestroy); state.defaultMaterial = NULL;
+  lovrRelease(state.defaultBuffer, lovrBufferDestroy); state.defaultBuffer = NULL;
+  lovrRelease(state.defaultTexture, lovrTextureDestroy); state.defaultTexture = NULL;
+  while (state.materials) {
+    MaterialBlock* block = state.materials;
+    state.materials = block->next;
+    uint32_t available = 0;
+    for (uint32_t i = block->head; i != ~0u; i = block->nodes[i].next) CHECK(++available <= MATERIAL_BLOCK_SIZE);
+    CHECK(available == MATERIAL_BLOCK_SIZE);
+    gpu_buffer_destroy(block->buffer);
+    gpu_bundle_pool_destroy(block->bundlePool);
+    lovrFree(block->buffer);
+    lovrFree(block->bundlePool);
+    lovrFree(block->bundles);
+    lovrFree(block);
+  }
+  state.materialLayout = NULL;
+  for (size_t i = 0; i < COUNTOF(state.bufferAllocators); i++) {
+    destroyBuffers(&state.bufferAllocators[i]);
+    state.bufferAllocators[i] = (BufferAllocator) { 0 };
+  }
+  while (state.layouts) {
+    Layout* layout = state.layouts;
+    state.layouts = layout->next;
+    mtx_destroy(&layout->lock);
+    lovrFree(layout);
+  }
+  mtx_destroy(&builtin.lock);
+  state.builtinLayout = NULL;
+  state.defaultSamplers[FILTER_LINEAR] = NULL;
   state.initialized = state.lockReady = false;
   mtx_destroy(&state.lock);
   lovrFree(thread.stack.memory);
@@ -948,11 +1221,23 @@ static bool inputTransitions(void) {
   return true;
 }
 
-static bool scaledScene(void) {
-  sceneScale = 1.5f;
+static bool singleSampleScene(void) {
+  sceneSamples = 1;
   bool ok = sceneCanvas();
-  if (ok) { sceneScale = .75f; ok = sceneCanvas(); }
+  sceneSamples = 4;
+  return ok;
+}
+
+static bool scaledScene(void) {
+  bool ok = true;
+  for (unsigned samples = 1; samples <= 4 && ok; samples *= 4) {
+    sceneSamples = samples;
+    sceneScale = 1.5f;
+    ok = sceneCanvas();
+    if (ok) { sceneScale = .75f; ok = sceneCanvas(); }
+  }
   sceneScale = 1.f;
+  sceneSamples = 4;
   return ok;
 }
 
@@ -962,6 +1247,7 @@ int main(int argc, char** argv) {
     { "openvr.backend.retained-graphics", retainedGraphics },
     { "openvr.backend.panel-canvas", panelCanvas },
     { "openvr.backend.scene-canvas", sceneCanvas },
+    { "openvr.backend.single-sample-scene", singleSampleScene },
     { "openvr.backend.scaled-scene", scaledScene }
   };
   return nativeRunTests(argc, argv, tests, sizeof(tests) / sizeof(tests[0]));
