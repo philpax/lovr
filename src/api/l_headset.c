@@ -180,6 +180,23 @@ static int l_lovrHeadsetIsSeated(lua_State* L) {
   return 1;
 }
 
+static int l_lovrHeadsetGetRecenterStatus(lua_State* L) {
+  const char* statuses[] = { "available", "unsupported", "untracked", "unavailable" };
+  lua_pushstring(L, statuses[lovrHeadsetGetRecenterStatus()]);
+  lua_pushstring(L, lovrHeadsetGetRecenterSpace());
+  return 2;
+}
+
+static int l_lovrHeadsetRecenter(lua_State* L) {
+  if (lovrHeadsetGetRecenterStatus() != HEADSET_RECENTER_AVAILABLE) {
+    lua_pushboolean(L, false);
+    return 1;
+  }
+  luax_assert(L, lovrHeadsetRecenter());
+  lua_pushboolean(L, true);
+  return 1;
+}
+
 static int l_lovrHeadsetStart(lua_State* L) {
   return luax_pushsuccess(L, lovrHeadsetStart());
 }
@@ -1163,6 +1180,8 @@ static const luaL_Reg lovrHeadset[] = {
   { "getFeatures", l_lovrHeadsetGetFeatures },
   { "getLayerLimit", l_lovrHeadsetGetLayerLimit },
   { "isSeated", l_lovrHeadsetIsSeated },
+  { "getRecenterStatus", l_lovrHeadsetGetRecenterStatus },
+  { "recenter", l_lovrHeadsetRecenter },
   { "start", l_lovrHeadsetStart },
   { "stop", l_lovrHeadsetStop },
   { "isActive", l_lovrHeadsetIsActive },

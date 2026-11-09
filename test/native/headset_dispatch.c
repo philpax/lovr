@@ -24,6 +24,8 @@ static struct {
   uint32_t layerCount;
   bool main;
   unsigned submits;
+  HeadsetRecenterStatus recenterStatus;
+  unsigned recenters;
   Layer* curved;
   float curve;
   Device batteryDevice;
@@ -97,6 +99,8 @@ static void fakeHeadsetGetFeatures(HeadsetFeatures* features) {
 }
 
 static uint32_t fakeHeadsetGetLayerLimit(void) { return 7; }
+static HeadsetRecenterStatus fakeHeadsetGetRecenterStatus(void) { return fake.recenterStatus; }
+static bool fakeHeadsetRecenter(void) { fake.recenters++; return fake.result; }
 
 static Layer* fakeLayerCreate(const LayerInfo* info) {
   fake.info = info;
@@ -245,6 +249,8 @@ const HeadsetOps lovrHeadsetOpenXROps = {
   .HeadsetGetFeatures = fakeHeadsetGetFeatures,
   .HeadsetGetLayerLimit = fakeHeadsetGetLayerLimit,
   .HeadsetIsSeated = fakeHeadsetIsSeated,
+  .HeadsetGetRecenterStatus = fakeHeadsetGetRecenterStatus,
+  .HeadsetRecenter = fakeHeadsetRecenter,
   .HeadsetStart = fakeHeadsetStart,
   .HeadsetStop = fakeHeadsetStop,
   .HeadsetIsActive = fakeHeadsetIsActive,
@@ -454,6 +460,21 @@ static bool creatorAndGeneration(void) {
   return true;
 }
 
+static bool recenterForwarding(void) {
+  memset(&fake, 0, sizeof(fake));
+  for (HeadsetRecenterStatus status = HEADSET_RECENTER_AVAILABLE; status <= HEADSET_RECENTER_UNAVAILABLE; status++) {
+    fake.recenterStatus = status;
+    CHECK(lovrHeadsetGetRecenterStatus() == status);
+    CHECK(!lovrHeadsetRecenter());
+    CHECK(fake.recenters == 1);
+  }
+  fake.recenterStatus = HEADSET_RECENTER_AVAILABLE;
+  fake.result = true;
+  CHECK(lovrHeadsetRecenter());
+  CHECK(fake.recenters == 2);
+  return true;
+}
+
 static bool vulkanForwarding(void) {
   memset(&fake, 0, sizeof(fake));
   int instance, info, allocator, proc;
@@ -477,6 +498,7 @@ int main(int argc, char** argv) {
     { "dispatch.features-and-layers", featuresAndLayers },
     { "dispatch.false-and-null-forwarding", falseAndNullForwarding },
     { "dispatch.vulkan-forwarding", vulkanForwarding },
+    { "dispatch.recenter-forwarding", recenterForwarding },
     { "dispatch.creator-and-generation", creatorAndGeneration }
   };
   return nativeRunTests(argc, argv, tests, sizeof(tests) / sizeof(tests[0]));

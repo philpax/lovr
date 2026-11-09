@@ -7,9 +7,10 @@ if(NOT DEFINED CTEST_EXECUTABLE OR NOT DEFINED TEST_DIRECTORY OR NOT DEFINED OPE
 endif()
 
 set(expected_names headset.dispatch.lifecycle headset.dispatch.features-and-layers
-  headset.dispatch.false-and-null-forwarding headset.dispatch.vulkan-forwarding
+  headset.dispatch.false-and-null-forwarding headset.dispatch.vulkan-forwarding headset.dispatch.recenter-forwarding
   headset.dispatch.creator-and-generation headset.dispatch.unchecked.creator-and-generation
-  headset.harness headset.harness.discovery headset.harness.failure-propagation)
+  headset.harness headset.harness.discovery headset.harness.failure-propagation
+  headset.runtime.paths.configuration headset.runtime.paths.lease)
 foreach(mode IN ITEMS native disabled emscripten)
   foreach(case IN ITEMS yield restart actual-exit discovery)
     list(APPEND expected_names headset.standalone.${mode}.${case})
@@ -17,6 +18,10 @@ foreach(mode IN ITEMS native disabled emscripten)
 endforeach()
 if(GPU_TESTS_ENABLED)
   list(APPEND expected_names headset.config)
+  foreach(case IN ITEMS lazy-lifecycle unsupported failures invalid-poses composition local-floor-rejection offset-snapshot
+      connection-loss large-finite-composition discovery)
+    list(APPEND expected_names headset.monado.recenter.${case})
+  endforeach()
   foreach(mode IN ITEMS enabled disabled)
     foreach(case IN ITEMS matrix connect-false legacy-connect-default cleanup-pending freeze gpu-lifetime ownership deferred-acquire failed-init-acquire actual-exit discovery)
       list(APPEND expected_names headset.selection.${mode}.${case})
@@ -24,7 +29,10 @@ if(GPU_TESTS_ENABLED)
   endforeach()
   list(APPEND expected_names headset.openxr.connect.no-overlay headset.openxr.connect.probe
     headset.openxr.connect.cleanup-retry headset.openxr.connect.failures
-    headset.openxr.connect.bindings-retry headset.openxr.connect.discovery)
+    headset.openxr.connect.bindings-retry headset.openxr.connect.matching-manifest headset.openxr.connect.discovery
+    headset.openxr.connect.stage-selection headset.openxr.connect.stage-fallback
+    headset.openxr.connect.recenter-status headset.openxr.connect.recenter-stage
+    headset.openxr.connect.recenter-invalidation headset.openxr.connect.recenter-failures)
   if(NOT DEFINED JOINT_EXECUTABLE OR NOT DEFINED JOINT_CASES)
     message(FATAL_ERROR "JOINT_EXECUTABLE and JOINT_CASES are required")
   endif()
@@ -102,7 +110,7 @@ if(GPU_TESTS_ENABLED)
   endif()
 endif()
 if(OPENVR_ENABLED)
-  foreach(helper IN ITEMS frame projection events haptics foveation)
+  foreach(helper IN ITEMS frame projection events haptics foveation recenter)
     file(READ "${CMAKE_CURRENT_LIST_DIR}/openvr_${helper}.c" helper_source)
     string(REGEX MATCH "NativeTest[ \t\r\n]+tests\\[\\][ \t\r\n]*=[ \t\r\n]*\\{[^;]*\\};" helper_test_list "${helper_source}")
     string(REGEX MATCHALL "\\{[ \t\r\n]*\"[^\"]+\"[ \t\r\n]*," helper_case_entries "${helper_test_list}")
@@ -131,7 +139,7 @@ if(OPENVR_ENABLED)
     headset.openvr.overlay-sdk-fntables headset.openvr.idempotent-lifecycle headset.openvr.exclusive-owner
     headset.openvr.init-failure-cleanup-retry headset.openvr.version-failure-cleanup
     headset.openvr.interface-failure-cleanup headset.openvr.sdk-failure-cleanup headset.openvr.incomplete-loader
-    headset.openvr.discovery headset.openvr.without-runtime
+    headset.openvr.discovery headset.openvr.without-runtime headset.openvr.optional-chaperone
     headset.openvr.vulkan.negotiation headset.openvr.vulkan.query-errors
     headset.openvr.vulkan.empty-and-invalid headset.openvr.vulkan.allocation-errors
     headset.openvr.vulkan.adapter-errors headset.openvr.vulkan.vulkan-errors headset.openvr.vulkan.discovery

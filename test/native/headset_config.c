@@ -11,6 +11,16 @@
 
 static HeadsetConfig captured;
 static unsigned initCount;
+static HeadsetRecenterStatus recenterStatus;
+static bool recenterResult;
+static unsigned recenters;
+
+HeadsetRecenterStatus lovrHeadsetGetRecenterStatus(void) { return recenterStatus; }
+const char* lovrHeadsetGetRecenterSpace(void) { return "standing"; }
+bool lovrHeadsetRecenter(void) {
+  recenters++;
+  return recenterResult || lovrSetError("Headset recenter: runtime operation failed");
+}
 
 bool lovrHeadsetInit(HeadsetConfig* config) {
   captured = *config;
@@ -95,12 +105,41 @@ static bool extensions(void) {
   return true;
 }
 
+static bool recenterBindings(void) {
+  lua_State* L = luaL_newstate();
+  CHECK(L);
+  luaL_openlibs(L);
+  const char* statuses[] = { "available", "unsupported", "untracked", "unavailable" };
+  for (unsigned i = 0; i < COUNTOF(statuses); i++) {
+    recenterStatus = (HeadsetRecenterStatus) i;
+    lua_pushcfunction(L, l_lovrHeadsetGetRecenterStatus);
+    CHECK(lua_pcall(L, 0, 1, 0) == 0);
+    CHECK(!strcmp(lua_tostring(L, -1), statuses[i]));
+    lua_pop(L, 1);
+    recenters = 0;
+    recenterResult = true;
+    lua_pushcfunction(L, l_lovrHeadsetRecenter);
+    CHECK(lua_pcall(L, 0, 1, 0) == 0);
+    CHECK(lua_toboolean(L, -1) == (i == HEADSET_RECENTER_AVAILABLE));
+    CHECK(recenters == (i == HEADSET_RECENTER_AVAILABLE));
+    lua_pop(L, 1);
+  }
+  recenterStatus = HEADSET_RECENTER_AVAILABLE;
+  recenterResult = false;
+  lua_pushcfunction(L, l_lovrHeadsetRecenter);
+  CHECK(lua_pcall(L, 0, 1, 0) != 0);
+  CHECK(strstr(lua_tostring(L, -1), "runtime operation failed"));
+  luax_close(L);
+  return true;
+}
+
 int main(int argc, char** argv) {
   const NativeTest tests[] = {
     { "headset.config.defaults", defaults },
     { "headset.config.backends", backends },
     { "headset.config.invalid-backend", invalidBackend },
-    { "headset.config.extensions", extensions }
+    { "headset.config.extensions", extensions },
+    { "headset.recenter.bindings", recenterBindings }
   };
   return nativeRunTests(argc, argv, tests, COUNTOF(tests));
 }

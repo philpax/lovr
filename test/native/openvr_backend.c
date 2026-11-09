@@ -27,6 +27,11 @@ static OpenVRAssetsResult backendAssetsResolve(bool shared, const OpenVRAssetsPr
 #define validTangents foveationValidTangents
 #include "../../src/modules/headset/openvr_foveation.c"
 #undef validTangents
+#define inspect recenterInspect
+#define validMatrix recenterValidMatrix
+#include "../../src/modules/headset/openvr_recenter.c"
+#undef validMatrix
+#undef inspect
 static Event backendEvents[32];
 static unsigned backendEventCount;
 void lovrEventPush(Event event) {
@@ -409,6 +414,9 @@ static bool unsupportedOutputs(void) {
   HeadsetFeatures output;
   features(&output);
   CHECK(output.overlay && !output.handTracking && !output.depthSubmission && !output.layerFilter);
+  CHECK(lovrHeadsetOpenVROps.HeadsetGetRecenterStatus() == HEADSET_RECENTER_UNAVAILABLE);
+  CHECK(!lovrHeadsetOpenVROps.HeadsetRecenter());
+  CHECK(strstr(lovrGetError(), "openvr: recenter:") != NULL);
   CHECK(disconnect());
   return true;
 }
@@ -495,6 +503,67 @@ static bool asymmetricViewAngles(void) {
     for (unsigned i = 0; i < 16; i++) CHECK(fabsf(matrix[i] - oracle[i]) < 1e-5f);
   }
   CHECK(disconnect());
+  return true;
+}
+static bool recenterCommit;
+static unsigned recenterCommits;
+static HmdMatrix34_t OPENVR_FNTABLE_CALLTYPE recenterZero(void) {
+  return (HmdMatrix34_t) { .m = { { 1, 0, 0, 0 }, { 0, 1, 0, 0 }, { 0, 0, 1, 0 } } };
+}
+static bool OPENVR_FNTABLE_CALLTYPE recenterGetZero(HmdMatrix34_t* zero) { *zero = recenterZero(); return true; }
+static void OPENVR_FNTABLE_CALLTYPE recenterSetZero(HmdMatrix34_t* zero) { (void) zero; }
+static void OPENVR_FNTABLE_CALLTYPE recenterRevert(void) {}
+static bool OPENVR_FNTABLE_CALLTYPE recenterSave(EChaperoneConfigFile file) {
+  if (file != EChaperoneConfigFile_Live) abort();
+  recenterCommits++;
+  return recenterCommit;
+}
+static bool OPENVR_FNTABLE_CALLTYPE recenterBounds(HmdQuad_t* quads, uint32_t* count) { (void) quads; *count = 0; return true; }
+static void OPENVR_FNTABLE_CALLTYPE recenterSetBounds(HmdQuad_t* quads, uint32_t count) { (void) quads; (void) count; }
+static ChaperoneCalibrationState OPENVR_FNTABLE_CALLTYPE recenterCalibration(void) { return ChaperoneCalibrationState_OK; }
+static void OPENVR_FNTABLE_CALLTYPE recenterHead(ETrackingUniverseOrigin origin, float prediction, TrackedDevicePose_t* head, uint32_t count) {
+  (void) origin; (void) prediction;
+  if (count != 1) abort();
+  *head = (TrackedDevicePose_t) { .bDeviceIsConnected = true, .bPoseIsValid = true,
+    .eTrackingResult = ETrackingResult_TrackingResult_Running_OK, .mDeviceToAbsoluteTracking = recenterZero() };
+}
+static bool recenterInvalidatesSnapshots(void) {
+  for (unsigned seated = 0; seated < 2; seated++) {
+    begin();
+    state.config.seated = seated;
+    struct VR_IVRSystem_FnTable system = { .GetDeviceToAbsoluteTrackingPose = recenterHead,
+      .GetRawZeroPoseToStandingAbsoluteTrackingPose = recenterZero };
+    struct VR_IVRChaperone_FnTable chaperone = { .GetCalibrationState = recenterCalibration };
+    struct VR_IVRChaperoneSetup_FnTable setup = { .RevertWorkingCopy = recenterRevert, .CommitWorkingCopy = recenterSave,
+      .GetLiveSeatedZeroPoseToRawTrackingPose = recenterGetZero,
+      .GetWorkingSeatedZeroPoseToRawTrackingPose = recenterGetZero, .GetWorkingStandingZeroPoseToRawTrackingPose = recenterGetZero,
+      .SetWorkingSeatedZeroPoseToRawTrackingPose = recenterSetZero, .SetWorkingStandingZeroPoseToRawTrackingPose = recenterSetZero,
+      .GetWorkingCollisionBoundsInfo = recenterBounds, .SetWorkingCollisionBoundsInfo = recenterSetBounds };
+    state.runtime.system = &system;
+    state.runtime.chaperone = &chaperone;
+    state.runtime.chaperoneSetup = &setup;
+    state.frame.updated = state.frame.snapshot.head.valid = state.frame.snapshot.velocityValid = true;
+    state.frame.snapshot.eyes[0].pose.valid = state.frame.snapshot.eyes[1].pose.valid = true;
+    state.inputSerial = 3;
+    state.input.hands[0].poses[0] = (InputPoseActionData_t) { .bActive = true,
+      .pose = { .bDeviceIsConnected = true, .bPoseIsValid = true, .mDeviceToAbsoluteTracking = recenterZero() } };
+    state.haptics.hands[0].active = true;
+    state.scene.captured = state.scene.prepared = state.scene.requested = true;
+    backendEventCount = recenterCommits = 0;
+    recenterCommit = false;
+    CHECK(!lovrHeadsetOpenVROps.HeadsetRecenter());
+    CHECK(state.frame.snapshot.head.valid && state.inputSerial == 3 && state.scene.captured);
+    recenterCommit = true;
+    CHECK(lovrHeadsetOpenVROps.HeadsetRecenter());
+    CHECK(recenterCommits == 2 && !backendEventCount);
+    CHECK(state.frame.updated && !state.frame.snapshot.head.valid && !state.inputSerial);
+    CHECK(!state.input.hands[0].poses[0].bActive && !state.haptics.hands[0].active);
+    CHECK(!state.scene.captured && !state.scene.prepared && !state.scene.requested);
+    float p[3], q[4], v[3], a[3];
+    CHECK(!pose(DEVICE_HEAD, p, q) && !pose(DEVICE_HAND_LEFT, p, q));
+    CHECK(!viewPose(0, p, q) && !viewPose(1, p, q) && !velocity(DEVICE_HEAD, v, a));
+    CHECK(disconnect());
+  }
   return true;
 }
 static unsigned eventPolls;
@@ -637,6 +706,7 @@ int main(int argc, char** argv) {
     { "openvr.backend.snapshot-routes", snapshotRoutes },
     { "openvr.backend.asymmetric-view-angles", asymmetricViewAngles },
     { "openvr.backend.events-recenter", eventIntegration },
+    { "openvr.backend.recenter-invalidates-snapshots", recenterInvalidatesSnapshots },
     { "openvr.backend.actual-exit", actualExit }
   };
   return nativeRunTests(argc, argv, tests, sizeof(tests) / sizeof(tests[0]));

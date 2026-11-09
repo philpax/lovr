@@ -1,6 +1,10 @@
 #include "headset/headset_ops.h"
 #include "headset/headset_openxr.h"
 #include "headset/headset_layer.h"
+#include "headset/runtime_paths.h"
+#if defined(__linux__) && !defined(__ANDROID__)
+#include "headset/monado_recenter.h"
+#endif
 #include "actions.h"
 #include "data/blob.h"
 #include "data/image.h"
@@ -239,6 +243,14 @@ static struct {
   XrSession session;
   XrSessionState sessionState;
   XrSpace referenceSpace;
+  XrReferenceSpaceType referenceSpaceType;
+  bool runtimeManifestSelected;
+  bool trackingInvalidated;
+#if defined(__linux__) && !defined(__ANDROID__)
+  MonadoRecenter recenter;
+  XrSpace recenterSpace;
+  bool monadoStage;
+#endif
   float* refreshRates;
   uint32_t refreshRateCount;
   bool hdr;
@@ -543,6 +555,28 @@ OpenXRConnectResult lovrOpenXRConnect(OpenXRConnectMode mode) {
   }
 #endif
 
+  // Select the exact manifest that supplied libmonado, before the loader discovers a runtime.
+  state.runtimeManifestSelected = false;
+#if defined(__linux__) && !defined(__ANDROID__) && !defined(LOVR_SYSTEM_OPENXR)
+  HeadsetRuntimePaths runtimePaths = lovrHeadsetGetRuntimePaths();
+  if (runtimePaths.manifest && runtimePaths.library && lovrHeadsetValidateRuntimeManifest()) {
+    PFN_xrInitializeLoaderKHR initialize = NULL;
+    XrResult lookup = xrGetInstanceProcAddr(XR_NULL_HANDLE, "xrInitializeLoaderKHR", (PFN_xrVoidFunction*) &initialize);
+    if (XR_SUCCEEDED(lookup) && initialize) {
+      XrLoaderInitPropertyValueEXT property = { "XR_RUNTIME_JSON", runtimePaths.manifest };
+      XrLoaderInitInfoPropertiesEXT info = {
+        .type = XR_TYPE_LOADER_INIT_INFO_PROPERTIES_EXT,
+        .propertyValueCount = 1,
+        .propertyValues = &property
+      };
+      state.runtimeManifestSelected = XR_SUCCEEDED(initialize((const XrLoaderInitInfoBaseHeaderKHR*) &info));
+    }
+    if (!state.runtimeManifestSelected) {
+      lovrLog(LOG_WARN, "XR", "openxr: playspace reset: matching manifest selection is unavailable");
+    }
+  }
+#endif
+
   // Extensions
 
   uint32_t extensionCount = 0;
@@ -682,6 +716,7 @@ OpenXRConnectResult lovrOpenXRConnect(OpenXRConnectMode mode) {
   };
 
   XRG(xrCreateInstance(&instanceInfo, &state.instance), "xrCreateInstance", fail);
+  lovrHeadsetRuntimePathsLock(true);
   lovrFree(enabledExtensionNames);
   enabledExtensionNames = NULL;
 
@@ -706,6 +741,17 @@ OpenXRConnectResult lovrOpenXRConnect(OpenXRConnectMode mode) {
 
     XRG(xrCreateDebugUtilsMessengerEXT(state.instance, &messengerInfo, &state.messenger), "xrCreateDebugUtilsMessengerEXT", fail);
   }
+
+#if defined(__linux__) && !defined(__ANDROID__)
+  if (state.runtimeManifestSelected) {
+    if (!lovrHeadsetValidateRuntimeManifest()) {
+      state.runtimeManifestSelected = false;
+      lovrLog(LOG_WARN, "XR", "openxr: recenter: manifest changed across runtime loading");
+    } else if (!lovrMonadoRecenterInit(&state.recenter, lovrHeadsetGetRuntimePaths().library)) {
+      lovrLog(LOG_WARN, "XR", "%s", lovrGetError());
+    }
+  }
+#endif
 
   state.instanceProperties.type = XR_TYPE_INSTANCE_PROPERTIES;
   XRG(xrGetInstanceProperties(state.instance, &state.instanceProperties), "xrGetInstanceProperties", fail);
@@ -1049,6 +1095,53 @@ fail:
   return cleanupConnection();
 }
 
+#if defined(__linux__) && !defined(__ANDROID__)
+static bool recenterHead(XrSpaceLocation* location) {
+  if (!state.recenterSpace || !state.spaces[DEVICE_HEAD] || state.frameState.predictedDisplayTime <= 0 || state.trackingInvalidated) return false;
+  XrSpaceLocationFlags required = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+    XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+  return XR_SUCCEEDED(xrLocateSpace(state.spaces[DEVICE_HEAD], state.recenterSpace, state.frameState.predictedDisplayTime, location)) &&
+    (location->locationFlags & required) == required;
+}
+
+static HeadsetRecenterStatus openxrHeadsetGetRecenterStatus(void) {
+  if (!state.runtimeManifestSelected || !state.monadoStage || !state.recenter.path ||
+      state.referenceSpaceType != XR_REFERENCE_SPACE_TYPE_STAGE) return HEADSET_RECENTER_UNSUPPORTED;
+  if (!state.session || !SESSION_RUNNING(state.sessionState) || !state.recenterSpace || state.trackingInvalidated) return HEADSET_RECENTER_UNAVAILABLE;
+  XrSpaceLocation head = { .type = XR_TYPE_SPACE_LOCATION };
+  bool tracked = recenterHead(&head);
+  float position[3], orientation[4];
+  memcpy(position, &head.pose.position, sizeof(position));
+  memcpy(orientation, &head.pose.orientation, sizeof(orientation));
+  return lovrMonadoGetRecenterStatus(&state.recenter, MND_SPACE_REFERENCE_TYPE_STAGE, position, orientation, tracked);
+}
+
+static const char* openxrHeadsetGetRecenterSpace(void) {
+  return state.runtimeManifestSelected && state.monadoStage && state.recenter.path &&
+    state.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE ? "stage" : NULL;
+}
+
+static bool openxrHeadsetRecenter(void) {
+  if (openxrHeadsetGetRecenterStatus() != HEADSET_RECENTER_AVAILABLE) {
+    return lovrSetError("openxr: recenter: shared stage reset is not available");
+  }
+  mnd_pose_t before;
+  if (!lovrMonadoReadRecenterOffset(&state.recenter, MND_SPACE_REFERENCE_TYPE_STAGE, &before)) return false;
+  XrSpaceLocation head = { .type = XR_TYPE_SPACE_LOCATION };
+  bool tracked = recenterHead(&head);
+  float position[3], orientation[4];
+  memcpy(position, &head.pose.position, sizeof(position));
+  memcpy(orientation, &head.pose.orientation, sizeof(orientation));
+  bool success = lovrMonadoRecenterFromOffset(&state.recenter, MND_SPACE_REFERENCE_TYPE_STAGE,
+    &before, position, orientation, tracked);
+  // A setter can mutate before reporting failure. Frame timing remains valid for submission.
+  if (state.recenter.writeAttempted) state.trackingInvalidated = true;
+  if (!success) return false;
+  lovrEventPush((Event) { .type = EVENT_RECENTER });
+  return true;
+}
+#endif
+
 static bool openxrHeadsetIsConnected(void) {
   return state.connected && !state.cleanupPending;
 }
@@ -1092,7 +1185,7 @@ static uint32_t openxrHeadsetGetLayerLimit(void) {
 }
 
 static bool openxrHeadsetIsSeated(void) {
-  return state.config.seated;
+  return state.referenceSpaceType != XR_REFERENCE_SPACE_TYPE_STAGE && state.config.seated;
 }
 
 static bool openxrHeadsetStart(void) {
@@ -1182,6 +1275,22 @@ static bool openxrHeadsetStart(void) {
       .type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO,
       .poseInReferenceSpace = { { 0.f, 0.f, 0.f, 1.f }, { 0.f, 0.f, 0.f } }
     };
+
+#if defined(__linux__) && !defined(__ANDROID__)
+    state.monadoStage = false;
+    mnd_pose_t offset;
+    if (state.runtimeManifestSelected && state.recenter.path && lovrHeadsetGetRuntimePaths().monadoStageUnmapped &&
+        lovrHeadsetValidateRuntimeManifest() &&
+        lovrMonadoReadRecenterOffset(&state.recenter, MND_SPACE_REFERENCE_TYPE_STAGE, &offset)) {
+      referenceSpaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+      if (XR_SUCCEEDED(xrCreateReferenceSpace(state.session, &referenceSpaceInfo, &state.recenterSpace))) {
+        state.monadoStage = true;
+      } else {
+        state.recenterSpace = XR_NULL_HANDLE;
+        lovrLog(LOG_WARN, "XR", "openxr: recenter: shared stage reference space is unavailable");
+      }
+    }
+#endif
 
     // Head
     referenceSpaceInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
@@ -1467,8 +1576,15 @@ static bool openxrStopSession(void) {
     }
   }
 
+#if defined(__linux__) && !defined(__ANDROID__)
+  if (state.recenterSpace) XR(xrDestroySpace(state.recenterSpace), "xrDestroySpace");
+  state.recenterSpace = XR_NULL_HANDLE;
+  state.monadoStage = false;
+#endif
   if (state.referenceSpace) XR(xrDestroySpace(state.referenceSpace), "xrDestroySpace");
   state.referenceSpace = XR_NULL_HANDLE;
+  state.referenceSpaceType = 0;
+  state.trackingInvalidated = false;
 
   if (state.session) XR(xrDestroySession(state.session), "xrDestroySession");
   state.sessionState = XR_SESSION_STATE_UNKNOWN;
@@ -1573,7 +1689,8 @@ static bool openxrHeadsetPollEvents(void) {
       }
       case XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: {
         XrEventDataReferenceSpaceChangePending* event = (XrEventDataReferenceSpaceChangePending*) &e;
-        if (event->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
+        if (event->referenceSpaceType == state.referenceSpaceType ||
+            (state.referenceSpaceType != XR_REFERENCE_SPACE_TYPE_STAGE && event->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL)) {
           if (!createReferenceSpace(event->changeTime)) {
             return false;
           }
@@ -1638,6 +1755,7 @@ static bool openxrHeadsetUpdate(void) {
   if (SESSION_RUNNING(state.sessionState)) {
     state.lastDisplayTime = state.frameState.predictedDisplayTime;
     XR(xrWaitFrame(state.session, NULL, &state.frameState), "xrWaitFrame");
+    state.trackingInvalidated = false;
     state.waited = true;
 
     if (state.epoch == 0) {
@@ -2012,7 +2130,7 @@ static bool openxrHeadsetGetHandPose(Side side, HandPose type, float* position, 
     return type == HAND_GRIP;
   }
 
-  if (state.frameState.predictedDisplayTime <= 0) {
+  if (state.frameState.predictedDisplayTime <= 0 || state.trackingInvalidated) {
     return false;
   }
 
@@ -2030,7 +2148,7 @@ static bool openxrHeadsetGetPose(Device device, float* position, float* orientat
     return true;
   }
 
-  if (state.frameState.predictedDisplayTime <= 0) {
+  if (state.frameState.predictedDisplayTime <= 0 || state.trackingInvalidated) {
     return false;
   }
 
@@ -2095,7 +2213,7 @@ static bool openxrHeadsetGetPose(Device device, float* position, float* orientat
 }
 
 static bool openxrHeadsetGetVelocity(Device device, float* linearVelocity, float* angularVelocity) {
-  if (!state.session || !state.spaces[device] || state.frameState.predictedDisplayTime <= 0) {
+  if (!state.session || !state.spaces[device] || state.frameState.predictedDisplayTime <= 0 || state.trackingInvalidated) {
     return false;
   }
 
@@ -2300,7 +2418,7 @@ static bool openxrHeadsetGetSkeleton(Device device, float* poses, SkeletonSource
   if (device == DEVICE_BODY) {
     XrBodyTrackerBD tracker = getBodyTracker();
 
-    if (!tracker || state.frameState.predictedDisplayTime <= 0) {
+    if (!tracker || state.frameState.predictedDisplayTime <= 0 || state.trackingInvalidated) {
       return false;
     }
 
@@ -2344,7 +2462,7 @@ static bool openxrHeadsetGetSkeleton(Device device, float* poses, SkeletonSource
 
   XrHandTrackerEXT tracker = getHandTracker(device);
 
-  if (!tracker || state.frameState.predictedDisplayTime <= 0) {
+  if (!tracker || state.frameState.predictedDisplayTime <= 0 || state.trackingInvalidated) {
     return false;
   }
 
@@ -4029,7 +4147,13 @@ static bool openxrDisconnect(void) {
     XR(xrDestroyDebugUtilsMessengerEXT(state.messenger), "xrDestroyDebugUtilsMessengerEXT");
     state.messenger = XR_NULL_HANDLE;
   }
-  if (state.instance) XR(xrDestroyInstance(state.instance), "xrDestroyInstance");
+  if (state.instance) {
+    XR(xrDestroyInstance(state.instance), "xrDestroyInstance");
+    lovrHeadsetRuntimePathsLock(false);
+  }
+#if defined(__linux__) && !defined(__ANDROID__)
+  lovrMonadoRecenterDestroy(&state.recenter);
+#endif
   lovrFree(state.blendModes);
   HeadsetConfig config = state.config;
   Simulator simulator = state.simulator;
@@ -4124,7 +4248,8 @@ static bool updateViewSize(void) {
 }
 
 static XrViewStateFlags locateViews(XrView views[4], uint32_t* count) {
-  if (state.frameState.predictedDisplayTime <= 0) {
+  *count = 0;
+  if (state.frameState.predictedDisplayTime <= 0 || state.trackingInvalidated) {
     return 0;
   }
 
@@ -4246,8 +4371,23 @@ static bool createReferenceSpace(XrTime time) {
     .poseInReferenceSpace = { { 0.f, 0.f, 0.f, 1.f }, { 0.f, 0.f, 0.f } }
   };
 
-  // Reference space doesn't need to be recreated for seated experiences (those always use local
-  // space), or when local-floor is supported.  Otherwise, vertical offset must be re-measured.
+#if defined(__linux__) && !defined(__ANDROID__)
+  if (state.monadoStage) {
+    if (state.referenceSpace && state.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_STAGE) return true;
+    info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+    if (XR_SUCCEEDED(xrCreateReferenceSpace(state.session, &info, &state.referenceSpace))) {
+      state.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+      return true;
+    }
+    state.referenceSpace = XR_NULL_HANDLE;
+    state.monadoStage = false;
+    XR(xrDestroySpace(state.recenterSpace), "xrDestroySpace");
+    state.recenterSpace = XR_NULL_HANDLE;
+    lovrLog(LOG_WARN, "XR", "openxr: recenter: stage rendering space is unavailable");
+  }
+#endif
+
+  // Only the emulated floor offset needs to be re-measured on reference space changes.
   if (state.referenceSpace && (state.extensions.localFloor || state.config.seated)) {
     return true;
   }
@@ -4280,6 +4420,7 @@ static bool createReferenceSpace(XrTime time) {
   }
 
   XR(xrCreateReferenceSpace(state.session, &info, &state.referenceSpace), "xrCreateReferenceSpace");
+  state.referenceSpaceType = info.referenceSpaceType;
   return true;
 }
 
@@ -4580,6 +4721,11 @@ const HeadsetOps lovrHeadsetOpenXROps = {
   .HeadsetGetFeatures = openxrHeadsetGetFeatures,
   .HeadsetGetLayerLimit = openxrHeadsetGetLayerLimit,
   .HeadsetIsSeated = openxrHeadsetIsSeated,
+#if defined(__linux__) && !defined(__ANDROID__)
+  .HeadsetGetRecenterStatus = openxrHeadsetGetRecenterStatus,
+  .HeadsetGetRecenterSpace = openxrHeadsetGetRecenterSpace,
+  .HeadsetRecenter = openxrHeadsetRecenter,
+#endif
   .HeadsetStart = openxrHeadsetStart,
   .HeadsetStop = openxrHeadsetStop,
   .HeadsetIsActive = openxrHeadsetIsActive,

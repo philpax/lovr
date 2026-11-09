@@ -14,6 +14,10 @@ typedef struct HeadsetOps {
   void (*HeadsetGetFeatures)(HeadsetFeatures* features);
   uint32_t (*HeadsetGetLayerLimit)(void);
   bool (*HeadsetIsSeated)(void);
+  // Optional: only backends with a runtime-wide reset implement these.
+  HeadsetRecenterStatus (*HeadsetGetRecenterStatus)(void);
+  const char* (*HeadsetGetRecenterSpace)(void);
+  bool (*HeadsetRecenter)(void);
   bool (*HeadsetStart)(void);
   void (*HeadsetStop)(void);
   bool (*HeadsetIsActive)(void);

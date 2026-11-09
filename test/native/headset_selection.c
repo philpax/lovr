@@ -238,6 +238,8 @@ static bool matrix(void) {
         }
         CHECK(strcmp(attempts, expected) == 0);
         CHECK(lovrHeadsetIsConnected() == connected);
+        CHECK(lovrHeadsetGetRecenterStatus() == HEADSET_RECENTER_UNSUPPORTED);
+        CHECK(!lovrHeadsetRecenter());
         #ifdef LOVR_ENABLE_OPENVR
         CHECK(lovrHeadsetRequiresPhysicalDevice() == (connected && vr.connected));
 #else

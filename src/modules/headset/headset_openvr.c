@@ -1,5 +1,6 @@
 #include "headset/headset_layer.h"
 #include "headset/openvr_runtime.h"
+#include "headset/openvr_recenter.h"
 #ifdef LOVR_ENABLE_OPENVR_DIAGNOSTIC
 #include "headset/openvr_diagnostic.h"
 #endif
@@ -418,6 +419,22 @@ static uint32_t generation(void) { return state.generation; }
 static const char* name(void) { return NULL; }
 static const char* driver(void) { return connected() ? "SteamVR" : NULL; }
 static bool seated(void) { return state.config.seated; }
+static HeadsetRecenterStatus getRecenterStatus(void) {
+  if (!active()) return HEADSET_RECENTER_UNAVAILABLE;
+  return lovrOpenVRGetRecenterStatus(&state.runtime, state.config.seated ?
+    ETrackingUniverseOrigin_TrackingUniverseSeated : ETrackingUniverseOrigin_TrackingUniverseStanding);
+}
+static const char* recenterSpace(void) { return state.config.seated ? "seated" : "standing"; }
+static bool recenter(void) {
+  if (!active()) {
+    lovrSetError("openvr: recenter: headset session is not active");
+    return false;
+  }
+  if (!lovrOpenVRRecenter(&state.runtime, state.config.seated ?
+      ETrackingUniverseOrigin_TrackingUniverseSeated : ETrackingUniverseOrigin_TrackingUniverseStanding)) return false;
+  // The runtime event can arrive later; no old-origin snapshot remains usable after the commit.
+  return projectionResult(invalidateFrame());
+}
 static uint32_t limit(void) { return MAX_LAYERS - 2; }
 static bool start(void) {
   lovrAssert(connected() && state.inputReady, "openvr: runtime input is not ready");
@@ -1251,6 +1268,9 @@ const HeadsetOps lovrHeadsetOpenVROps = {
   .HeadsetGetFeatures = features,
   .HeadsetGetLayerLimit = limit,
   .HeadsetIsSeated = seated,
+  .HeadsetGetRecenterStatus = getRecenterStatus,
+  .HeadsetGetRecenterSpace = recenterSpace,
+  .HeadsetRecenter = recenter,
   .HeadsetStart = start,
   .HeadsetStop = stop,
   .HeadsetIsActive = active,

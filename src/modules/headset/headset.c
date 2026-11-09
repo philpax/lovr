@@ -210,6 +210,21 @@ bool lovrHeadsetIsSeated(void) {
   return ops->HeadsetIsSeated();
 }
 
+HeadsetRecenterStatus lovrHeadsetGetRecenterStatus(void) {
+  return ops->HeadsetGetRecenterStatus && ops->HeadsetRecenter ? ops->HeadsetGetRecenterStatus() : HEADSET_RECENTER_UNSUPPORTED;
+}
+
+const char* lovrHeadsetGetRecenterSpace(void) {
+  return ops->HeadsetGetRecenterSpace ? ops->HeadsetGetRecenterSpace() : NULL;
+}
+
+bool lovrHeadsetRecenter(void) {
+  if (lovrHeadsetGetRecenterStatus() != HEADSET_RECENTER_AVAILABLE || !ops->HeadsetRecenter) {
+    return lovrSetError("Headset recenter: runtime reset is not available");
+  }
+  return ops->HeadsetRecenter();
+}
+
 bool lovrHeadsetStart(void) {
   return ops->HeadsetStart();
 }

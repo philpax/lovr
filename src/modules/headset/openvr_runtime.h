@@ -22,6 +22,8 @@ typedef struct OpenVRRuntime {
   struct VR_IVRInput_FnTable* input;
   struct VR_IVRCompositor_FnTable* compositor;
   struct VR_IVRApplications_FnTable* applications;
+  struct VR_IVRChaperone_FnTable* chaperone;
+  struct VR_IVRChaperoneSetup_FnTable* chaperoneSetup;
   OpenVRLoader loader;
   bool initialized;
 } OpenVRRuntime;

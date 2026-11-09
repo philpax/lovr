@@ -19,6 +19,14 @@ function(configure_native_test target)
   add_dependencies(headset_native_tests ${target})
 endfunction()
 
+add_executable(runtime_paths_tests runtime_paths.c ../../src/modules/headset/runtime_paths.c ../../src/util.c)
+target_include_directories(runtime_paths_tests PRIVATE ../../src ../../src/modules)
+configure_native_test(runtime_paths_tests)
+foreach(case IN ITEMS configuration lease)
+  add_test(NAME headset.runtime.paths.${case} COMMAND runtime_paths_tests --case runtime.paths.${case})
+  set_tests_properties(headset.runtime.paths.${case} PROPERTIES LABELS headset)
+endforeach()
+
 set(standalone_source "${CMAKE_CURRENT_SOURCE_DIR}/../../src/main.c")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${standalone_source}")
 file(READ "${standalone_source}" standalone_source_text)
@@ -53,7 +61,7 @@ target_include_directories(headset_dispatch_regression PRIVATE ../../src ../../s
 target_compile_options(headset_dispatch_regression PRIVATE -ffunction-sections -fdata-sections)
 target_link_options(headset_dispatch_regression PRIVATE -Wl,--gc-sections)
 configure_native_test(headset_dispatch_regression)
-foreach(case IN ITEMS lifecycle features-and-layers false-and-null-forwarding vulkan-forwarding creator-and-generation)
+foreach(case IN ITEMS lifecycle features-and-layers false-and-null-forwarding vulkan-forwarding creator-and-generation recenter-forwarding)
   add_test(NAME headset.dispatch.${case} COMMAND headset_dispatch_regression --case dispatch.${case})
   set_tests_properties(headset.dispatch.${case} PROPERTIES LABELS headset)
 endforeach()
@@ -69,6 +77,18 @@ add_test(NAME headset.dispatch.unchecked.creator-and-generation
 set_tests_properties(headset.dispatch.unchecked.creator-and-generation PROPERTIES LABELS headset)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(monado_recenter_tests monado_recenter.c ../../src/modules/headset/monado_recenter.c ../../src/util.c)
+  target_include_directories(monado_recenter_tests PRIVATE ../../src ../../src/modules ../../deps/monado)
+  target_link_libraries(monado_recenter_tests PRIVATE ${CMAKE_DL_LIBS} m)
+  configure_native_test(monado_recenter_tests)
+  foreach(case IN ITEMS lazy-lifecycle unsupported failures invalid-poses composition local-floor-rejection offset-snapshot
+      connection-loss large-finite-composition)
+    add_test(NAME headset.monado.recenter.${case} COMMAND monado_recenter_tests --case monado.recenter.${case})
+    set_tests_properties(headset.monado.recenter.${case} PROPERTIES LABELS headset)
+  endforeach()
+  add_test(NAME headset.monado.recenter.discovery COMMAND monado_recenter_tests --list)
+  set_tests_properties(headset.monado.recenter.discovery PROPERTIES LABELS headset)
+
   add_executable(headset_config_tests headset_config.c ../../src/util.c)
   target_include_directories(headset_config_tests PRIVATE ../../src ../../src/modules ../../src/api ${LOVR_LUA_INCLUDE})
   if(LOVR_USE_LUAU)
@@ -107,7 +127,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(headset.selection.${mode}.discovery PROPERTIES LABELS headset)
   endforeach()
 
-  add_executable(headset_openxr_connect_tests openxr_connect.c ../../src/util.c)
+  add_executable(headset_openxr_connect_tests openxr_connect.c ../../src/util.c ../../src/modules/headset/monado_recenter.c
+    ../../src/modules/headset/runtime_paths.c)
+  target_include_directories(headset_openxr_connect_tests PRIVATE ../../deps/monado)
+  target_link_libraries(headset_openxr_connect_tests PRIVATE ${CMAKE_DL_LIBS})
   target_include_directories(headset_openxr_connect_tests PRIVATE
     ../../src ../../src/modules ../../deps/openxr/include ../../deps/vulkan-headers/include)
   target_compile_definitions(headset_openxr_connect_tests PRIVATE LOVR_VK _POSIX_C_SOURCE=200809L)
@@ -119,14 +142,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   endif()
   target_link_options(headset_openxr_connect_tests PRIVATE -Wl,--gc-sections)
   target_link_libraries(headset_openxr_connect_tests PRIVATE m pthread)
-  foreach(case IN ITEMS no-overlay probe cleanup-retry failures bindings-retry)
+  foreach(case IN ITEMS no-overlay probe cleanup-retry failures bindings-retry matching-manifest
+      stage-selection stage-fallback recenter-status recenter-stage recenter-invalidation recenter-failures)
     add_test(NAME headset.openxr.connect.${case} COMMAND headset_openxr_connect_tests --case openxr.connect.${case})
     set_tests_properties(headset.openxr.connect.${case} PROPERTIES LABELS headset)
   endforeach()
   add_test(NAME headset.openxr.connect.discovery COMMAND headset_openxr_connect_tests --list)
   set_tests_properties(headset.openxr.connect.discovery PROPERTIES LABELS headset)
 
-  add_executable(headset_layer_lifetime_tests layer_lifetime.c ../../src/util.c ../../src/modules/headset/headset.c)
+  add_executable(headset_layer_lifetime_tests layer_lifetime.c ../../src/util.c ../../src/modules/headset/headset.c ../../src/modules/headset/monado_recenter.c
+    ../../src/modules/headset/runtime_paths.c)
+  target_include_directories(headset_layer_lifetime_tests PRIVATE ../../deps/monado)
+  target_link_libraries(headset_layer_lifetime_tests PRIVATE ${CMAKE_DL_LIBS})
   target_include_directories(headset_layer_lifetime_tests PRIVATE ../../src ../../src/modules ../../deps/openxr/include ../../deps/vulkan-headers/include)
   target_compile_definitions(headset_layer_lifetime_tests PRIVATE LOVR_VK _POSIX_C_SOURCE=200809L)
   configure_native_test(headset_layer_lifetime_tests)
@@ -308,12 +335,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(cleanup_failure_arguments -DCLEANUP_EXECUTABLE=$<TARGET_FILE:graphics_cleanup_tests>
     -DCLEANUP_CASES=${cleanup_case_argument})
 
-  add_executable(layer_graphics_lifetime_tests layer_graphics_lifetime.c ../../src/util.c ../../src/core/spv.c
+  add_executable(layer_graphics_lifetime_tests ../../src/modules/headset/runtime_paths.c
+    ../../src/modules/headset/monado_recenter.c layer_graphics_lifetime.c ../../src/util.c ../../src/core/spv.c
     ../../src/modules/headset/headset.c ../../src/modules/math/math.c ../../src/modules/data/blob.c ../../src/modules/data/image.c
     ../../src/modules/data/rasterizer.c)
   target_include_directories(layer_graphics_lifetime_tests PRIVATE ../../src ../../src/modules ../../etc
     ../../deps/msdfgen ../../deps/openxr/include ../../deps/vulkan-headers/include)
   target_compile_definitions(layer_graphics_lifetime_tests PRIVATE LOVR_VK MSDFGEN_PUBLIC= _POSIX_C_SOURCE=200809L)
+  target_include_directories(layer_graphics_lifetime_tests PRIVATE ../../deps/monado)
+  target_link_libraries(layer_graphics_lifetime_tests PRIVATE ${CMAKE_DL_LIBS})
   configure_native_test(layer_graphics_lifetime_tests)
   target_compile_options(layer_graphics_lifetime_tests PRIVATE -ffunction-sections -fdata-sections
     -Wno-unused-function -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare)
@@ -381,6 +411,18 @@ set_tests_properties(headset.harness headset.harness.discovery headset.harness.f
 
 if(LOVR_ENABLE_OPENVR)
   add_subdirectory(openvr_assets_staged)
+
+  add_executable(headset_openvr_recenter_tests openvr_recenter.c ../../src/modules/headset/openvr_recenter.c ../../src/util.c)
+  target_include_directories(headset_openvr_recenter_tests PRIVATE ../../src ../../src/modules)
+  target_include_directories(headset_openvr_recenter_tests SYSTEM PRIVATE ../../deps/openvr/headers)
+  target_link_libraries(headset_openvr_recenter_tests PRIVATE m)
+  configure_native_test(headset_openvr_recenter_tests)
+  foreach(case IN ITEMS status horizontal-yaw-floor-and-bounds atomic-failures)
+    add_test(NAME headset.openvr.recenter.${case} COMMAND headset_openvr_recenter_tests --case ${case})
+    set_tests_properties(headset.openvr.recenter.${case} PROPERTIES LABELS headset)
+  endforeach()
+  add_test(NAME headset.openvr.recenter.discovery COMMAND headset_openvr_recenter_tests --list)
+  set_tests_properties(headset.openvr.recenter.discovery PROPERTIES LABELS headset)
 
   foreach(helper IN ITEMS frame projection events haptics foveation)
     add_executable(headset_openvr_${helper}_tests openvr_${helper}.c ../../src/modules/headset/openvr_${helper}.c)
@@ -510,7 +552,7 @@ if(LOVR_ENABLE_OPENVR)
     target_link_options(lovr_openvr_loader INTERFACE -fsanitize=address,undefined)
   endif()
   foreach(case IN ITEMS overlay-sdk-fntables idempotent-lifecycle exclusive-owner init-failure-cleanup-retry
-      version-failure-cleanup interface-failure-cleanup sdk-failure-cleanup incomplete-loader)
+      version-failure-cleanup interface-failure-cleanup sdk-failure-cleanup incomplete-loader optional-chaperone)
     add_test(NAME headset.openvr.${case} COMMAND headset_openvr_tests --case openvr.${case})
     set_tests_properties(headset.openvr.${case} PROPERTIES LABELS headset)
   endforeach()

@@ -22,6 +22,8 @@ static struct {
   struct VR_IVRInput_FnTable input;
   struct VR_IVRCompositor_FnTable compositor;
   struct VR_IVRApplications_FnTable applications;
+  struct VR_IVRChaperone_FnTable chaperone;
+  struct VR_IVRChaperoneSetup_FnTable chaperoneSetup;
 } fake;
 
 static uint32_t LOVR_OPENVR_CALLTYPE fakeInit(EVRInitError* error, EVRApplicationType type, const char* startupInfo) {
@@ -53,11 +55,11 @@ static EVRInitError OPENVR_FNTABLE_CALLTYPE fakeSDK(uint32_t major, uint32_t min
 }
 
 static void* LOVR_OPENVR_CALLTYPE fakeInterface(const char* version, EVRInitError* error) {
-  const char* versions[] = { IVRSystem_Version, IVROverlay_Version, IVRInput_Version, IVRCompositor_Version, IVRApplications_Version };
-  void* tables[] = { &fake.system, &fake.overlay, &fake.input, &fake.compositor, &fake.applications };
+  const char* versions[] = { IVRSystem_Version, IVROverlay_Version, IVRInput_Version, IVRCompositor_Version, IVRApplications_Version, IVRChaperone_Version, IVRChaperoneSetup_Version };
+  void* tables[] = { &fake.system, &fake.overlay, &fake.input, &fake.compositor, &fake.applications, &fake.chaperone, &fake.chaperoneSetup };
   unsigned int index = fake.interfaces++;
-  fake.validCalls &= fake.active && fake.validations == 1 && index < 5;
-  if (index >= 5) {
+  fake.validCalls &= fake.active && fake.validations == 1 && index < 7;
+  if (index >= 7) {
     *error = EVRInitError_VRInitError_Init_InvalidInterface;
     return NULL;
   }
@@ -88,7 +90,7 @@ static void resetFake(void) {
 }
 
 static bool cleared(const OpenVRRuntime* runtime) {
-  return !runtime->initialized && !runtime->system && !runtime->overlay && !runtime->input && !runtime->compositor && !runtime->applications &&
+  return !runtime->initialized && !runtime->system && !runtime->overlay && !runtime->input && !runtime->compositor && !runtime->applications && !runtime->chaperone && !runtime->chaperoneSetup &&
     !runtime->loader.init && !runtime->loader.shutdown && !runtime->loader.getInterface && !runtime->loader.isInterfaceVersionValid;
 }
 
@@ -97,8 +99,9 @@ static bool connectsOverlay(void) {
   OpenVRRuntime runtime = { 0 };
   EVRInitError error = lovrOpenVRConnect(&runtime, &loader);
   bool connected = error == EVRInitError_VRInitError_None && runtime.initialized && runtime.system == &fake.system &&
-    runtime.overlay == &fake.overlay && runtime.input == &fake.input && runtime.compositor == &fake.compositor && runtime.applications == &fake.applications;
-  bool calls = fake.inits == 1 && fake.shutdowns == 0 && fake.validations == 1 && fake.interfaces == 5 && fake.sdkCalls == 1;
+    runtime.overlay == &fake.overlay && runtime.input == &fake.input && runtime.compositor == &fake.compositor && runtime.applications == &fake.applications &&
+    runtime.chaperone == &fake.chaperone && runtime.chaperoneSetup == &fake.chaperoneSetup;
+  bool calls = fake.inits == 1 && fake.shutdowns == 0 && fake.validations == 1 && fake.interfaces == 7 && fake.sdkCalls == 1;
   lovrOpenVRDisconnect(&runtime);
   CHECK(connected);
   CHECK(calls);
@@ -117,7 +120,7 @@ static bool idempotentLifecycle(void) {
   OpenVRLoader invalid = { 0 };
   EVRInitError second = lovrOpenVRConnect(&runtime, &invalid);
   EVRInitError third = lovrOpenVRConnect(&runtime, NULL);
-  bool calls = fake.inits == 1 && fake.interfaces == 5 && fake.sdkCalls == 1 && fake.shutdowns == 0;
+  bool calls = fake.inits == 1 && fake.interfaces == 7 && fake.sdkCalls == 1 && fake.shutdowns == 0;
   lovrOpenVRDisconnect(&runtime);
   lovrOpenVRDisconnect(&runtime);
   CHECK(first == EVRInitError_VRInitError_None && second == first && third == first);
@@ -142,7 +145,7 @@ static bool exclusiveOwner(void) {
   lovrOpenVRDisconnect(&secondRuntime);
   lovrOpenVRDisconnect(&copied);
   bool retained = ownerRuntime.initialized && fake.active && fake.shutdowns == 0 && fake.inits == 1 &&
-    fake.interfaces == 5 && fake.sdkCalls == 1 && cleared(&secondRuntime) && cleared(&copied);
+    fake.interfaces == 7 && fake.sdkCalls == 1 && cleared(&secondRuntime) && cleared(&copied);
   EVRInitError stillConnected = lovrOpenVRConnect(&ownerRuntime, &loader);
   lovrOpenVRDisconnect(&ownerRuntime);
   CHECK(first == EVRInitError_VRInitError_None && stillConnected == first);
@@ -201,6 +204,22 @@ static bool interfaceFailures(void) {
       CHECK(fake.sdkCalls == (i > 1 ? 1u : 0u));
       CHECK(fake.validCalls && !fake.active && cleared(&runtime));
     }
+  }
+  return true;
+}
+
+static bool optionalChaperone(void) {
+  for (unsigned i = 6; i <= 7; i++) {
+    resetFake();
+    fake.failInterface = i;
+    fake.interfaceError = EVRInitError_VRInitError_Init_InterfaceNotFound;
+    OpenVRRuntime runtime = { 0 };
+    EVRInitError error = lovrOpenVRConnect(&runtime, &loader);
+    bool supported = i == 6 ? runtime.chaperone == NULL && runtime.chaperoneSetup == &fake.chaperoneSetup :
+      runtime.chaperone == &fake.chaperone && runtime.chaperoneSetup == NULL;
+    lovrOpenVRDisconnect(&runtime);
+    CHECK(error == EVRInitError_VRInitError_None && supported && fake.validCalls);
+    CHECK(fake.interfaces == 7 && fake.shutdowns == 1 && cleared(&runtime));
   }
   return true;
 }
@@ -277,7 +296,8 @@ int main(int argc, char** argv) {
     { "openvr.version-failure-cleanup", versionFailure },
     { "openvr.interface-failure-cleanup", interfaceFailures },
     { "openvr.sdk-failure-cleanup", sdkFailures },
-    { "openvr.incomplete-loader", incompleteLoader }
+    { "openvr.incomplete-loader", incompleteLoader },
+    { "openvr.optional-chaperone", optionalChaperone }
   };
   return nativeRunTests(argc, argv, tests, sizeof(tests) / sizeof(tests[0]));
 }

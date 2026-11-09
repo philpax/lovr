@@ -354,6 +354,7 @@ set(LOVR_SRC
   src/core/fs.c
   src/api/api.c
   src/api/l_lovr.c
+  src/modules/headset/runtime_paths.c
   src/util.c
 )
 
@@ -466,6 +467,7 @@ target_link_directories(lovr PRIVATE ${LOVR_LIB_DIRS})
 if(LOVR_ENABLE_OPENVR)
   target_sources(lovr PRIVATE
     src/modules/headset/openvr_runtime.c
+    src/modules/headset/openvr_recenter.c
     src/modules/headset/openvr_vulkan.c
     src/modules/headset/openvr_overlay.c
     src/modules/headset/openvr_projection.c
@@ -717,6 +719,13 @@ if(LOVR_ENABLE_HEADSET)
 
   if(NOT EMSCRIPTEN)
     target_sources(lovr PRIVATE src/modules/headset/headset.c src/modules/headset/headset_openxr.c)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      target_sources(lovr PRIVATE src/modules/headset/monado_recenter.c)
+      target_include_directories(lovr PRIVATE deps/monado)
+    endif()
+    if(LOVR_SYSTEM_OPENXR)
+      target_compile_definitions(lovr PRIVATE LOVR_SYSTEM_OPENXR)
+    endif()
   endif()
 else()
   target_compile_definitions(lovr PRIVATE LOVR_DISABLE_HEADSET)

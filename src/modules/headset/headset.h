@@ -80,6 +80,13 @@ typedef enum {
   FOVEATION_HIGH
 } FoveationLevel;
 
+typedef enum {
+  HEADSET_RECENTER_AVAILABLE,
+  HEADSET_RECENTER_UNSUPPORTED,
+  HEADSET_RECENTER_UNTRACKED,
+  HEADSET_RECENTER_UNAVAILABLE
+} HeadsetRecenterStatus;
+
 // Pacing of the latest frame, in seconds. The runtime fields describe the compositor's most recent frame
 // and are filled only where the runtime reports them.
 typedef struct {
@@ -193,6 +200,10 @@ typedef enum {
   SOURCE_HAND
 } SkeletonSource;
 
+// Application-resolved matching runtime paths; copied, and configurable only without an OpenXR instance.
+bool lovrHeadsetSetRuntimePaths(const char* manifest, const char* monadoLibrary);
+bool lovrHeadsetSetRuntimeManifestSnapshot(const void* bytes, size_t length);
+bool lovrHeadsetSetMonadoStageUnmapped(bool unmapped);
 bool lovrHeadsetInit(HeadsetConfig* config);
 void lovrHeadsetDestroy(void);
 void lovrHeadsetWillExit(void);
@@ -203,6 +214,9 @@ const char* lovrHeadsetGetDriver(void);
 void lovrHeadsetGetFeatures(HeadsetFeatures* features);
 uint32_t lovrHeadsetGetLayerLimit(void);
 bool lovrHeadsetIsSeated(void);
+HeadsetRecenterStatus lovrHeadsetGetRecenterStatus(void);
+const char* lovrHeadsetGetRecenterSpace(void);
+bool lovrHeadsetRecenter(void);
 bool lovrHeadsetStart(void);
 void lovrHeadsetStop(void);
 bool lovrHeadsetIsActive(void);

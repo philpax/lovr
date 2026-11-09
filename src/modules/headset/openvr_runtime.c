@@ -84,6 +84,10 @@ static EVRInitError connect(OpenVRRuntime* runtime, const OpenVRLoader* loader) 
   runtime->applications = getInterface(runtime, IVRApplications_Version, &error);
   if (error != EVRInitError_VRInitError_None) goto fail;
 
+  // Recenter capabilities are optional and do not prevent an overlay connection.
+  runtime->chaperone = getInterface(runtime, IVRChaperone_Version, &error);
+  runtime->chaperoneSetup = getInterface(runtime, IVRChaperoneSetup_Version, &error);
+
   return EVRInitError_VRInitError_None;
 
 fail:
