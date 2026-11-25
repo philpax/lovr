@@ -5,6 +5,8 @@
 
 static bool validMatrix(const HmdMatrix34_t* matrix);
 static bool makePose(OpenVRFramePose* pose, const HmdMatrix34_t* matrix);
+static bool sampleHead(struct VR_IVRSystem_FnTable* system, ETrackingUniverseOrigin origin, float prediction,
+  TrackedDevicePose_t* device, OpenVRFramePose* pose);
 static HmdMatrix34_t compose(const HmdMatrix34_t* head, const HmdMatrix34_t* eye);
 static bool validTangents(const float* tangents);
 static void updateClock(OpenVRFrame* frame, OpenVRFrameSnapshot* snapshot);
@@ -49,6 +51,7 @@ OpenVRFrameResult lovrOpenVRFrameUpdate(OpenVRFrame* frame, ETrackingUniverseOri
     ETrackedDeviceProperty_Prop_DisplayFrequency_Float, &error);
   bool frequencyValid = error == ETrackedPropertyError_TrackedProp_Success &&
     isfinite(frequency) && frequency >= 1.f && frequency <= 1000.f;
+  float period = frequencyValid ? 1.f / frequency : 0.f;
   uint32_t timeout = frequencyValid ? (uint32_t) ceilf(2000.f / frequency) : 20;
   if (timeout > 100) timeout = 100;
   if (timeout < 1) timeout = 1;
@@ -83,7 +86,7 @@ OpenVRFrameResult lovrOpenVRFrameUpdate(OpenVRFrame* frame, ETrackingUniverseOri
   bool timing = system->GetTimeSinceLastVsync(&vsync, &counter);
   system->GetRecommendedRenderTargetSize(&snapshot.width, &snapshot.height);
   if (!frequencyValid || error != ETrackedPropertyError_TrackedProp_Success || !timing ||
-      !isfinite(photons) || photons < 0.f || photons > 1.f || !isfinite(vsync) || vsync < 0.f ||
+      !isfinite(photons) || photons < 0.f || photons > 1.f || !isfinite(vsync) || vsync < -period ||
       snapshot.width == 0 || snapshot.height == 0) {
     snapshot.width = snapshot.height = 0;
     updateClock(frame, &snapshot);
@@ -91,7 +94,6 @@ OpenVRFrameResult lovrOpenVRFrameUpdate(OpenVRFrame* frame, ETrackingUniverseOri
     return result;
   }
   snapshot.frequency = frequency;
-  float period = 1.f / frequency;
   double target = targetVsync(frame, now, period, vsync);
   snapshot.prediction = (float) (target - now + photons);
   snapshot.time = now + snapshot.prediction;
@@ -107,10 +109,10 @@ OpenVRFrameResult lovrOpenVRFrameUpdate(OpenVRFrame* frame, ETrackingUniverseOri
     frame->snapshot = snapshot;
     return result;
   }
-  TrackedDevicePose_t head = { 0 };
-  system->GetDeviceToAbsoluteTrackingPose(origin, snapshot.prediction, &head, 1);
-  if (head.bPoseIsValid && head.bDeviceIsConnected) {
-    makePose(&snapshot.head, &head.mDeviceToAbsoluteTracking);
+  TrackedDevicePose_t head;
+  if (!sampleHead(system, origin, snapshot.prediction, &head, &snapshot.head) && head.bDeviceIsConnected) {
+    // Some drivers can provide current tracking when the predicted pose is unavailable.
+    sampleHead(system, origin, 0.f, &head, &snapshot.head);
   }
   if (snapshot.head.valid) {
     snapshot.velocityValid = true;
@@ -191,7 +193,9 @@ static void updateClock(OpenVRFrame* frame, OpenVRFrameSnapshot* snapshot) {
 // estimate cannot move the display time backwards.
 static double targetVsync(const OpenVRFrame* frame, double now, double period, double vsync) {
   double composites = fmin(fmax(ceil(frame->work / period), 1.), MAX_COMPOSITES_AHEAD);
-  double target = now + period - fmod(vsync, period) + composites * period;
+  // A signed offset can reference the upcoming vsync on a virtual display.
+  double untilVsync = vsync < 0. ? -vsync : period - fmod(vsync, period);
+  double target = now + untilVsync + composites * period;
   double earliest = frame->lastTarget + .5 * period;
   if (frame->hasTarget && target < earliest) target += ceil((earliest - target) / period) * period;
   return target;
@@ -223,6 +227,13 @@ static bool makePose(OpenVRFramePose* pose, const HmdMatrix34_t* matrix) {
   quat_fromMat4(pose->orientation, pose->matrix);
   pose->valid = true;
   return true;
+}
+
+static bool sampleHead(struct VR_IVRSystem_FnTable* system, ETrackingUniverseOrigin origin, float prediction,
+    TrackedDevicePose_t* device, OpenVRFramePose* pose) {
+  memset(device, 0, sizeof(*device));
+  system->GetDeviceToAbsoluteTrackingPose(origin, prediction, device, 1);
+  return device->bPoseIsValid && device->bDeviceIsConnected && makePose(pose, &device->mDeviceToAbsoluteTracking);
 }
 
 static HmdMatrix34_t compose(const HmdMatrix34_t* head, const HmdMatrix34_t* eye) {

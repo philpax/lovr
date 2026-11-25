@@ -1,7 +1,7 @@
 #ifndef LOVR_OPENVR_RUNTIME_H
 #define LOVR_OPENVR_RUNTIME_H
 
-#include <openvr_capi.h>
+#include "openvr_api.h"
 
 #if defined(_WIN32)
 #define LOVR_OPENVR_CALLTYPE __cdecl

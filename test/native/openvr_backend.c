@@ -426,7 +426,7 @@ static bool connectionTransaction(void) {
   CHECK(init(&config));
   failAssets = true;
   CHECK(!connect() && !connected() && !state.inputReady && !state.input.api);
-  CHECK(strstr(lovrGetError(), "errno 13"));
+  CHECK(strstr(lovrGetError(), "OS error 13"));
   failAssets = false; failManifest = true;
   unsigned before = shutdowns;
   CHECK(!connect() && shutdowns == before + 1 && !state.input.api);

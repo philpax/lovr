@@ -2,7 +2,7 @@
 #define LOVR_OPENVR_PROJECTION_H
 
 #include "core/gpu.h"
-#include <openvr_capi.h>
+#include "openvr_api.h"
 
 typedef enum {
   OPENVR_PROJECTION_OK,

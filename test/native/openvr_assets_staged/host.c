@@ -7,7 +7,7 @@
 
 static const char* names[] = {
   "actions.json", "bindings_vive_controller.json", "bindings_knuckles.json", "bindings_oculus_touch.json",
-  "bindings_frame_controller.json"
+  "bindings_frame_controller.json", "bindings_vd_hand_controller.json"
 };
 
 static bool sameFile(const char* staged, const char* source) {

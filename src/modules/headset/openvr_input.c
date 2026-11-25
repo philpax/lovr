@@ -1,4 +1,5 @@
 #include "openvr_input.h"
+#include "openvr_assets.h"
 #include "core/maf.h"
 #include <math.h>
 #include <string.h>
@@ -22,6 +23,14 @@ static const DeviceButton buttons[] = {
 };
 
 static const DeviceAxis axes[] = { AXIS_TRIGGER, AXIS_THUMBSTICK, AXIS_TOUCHPAD, AXIS_GRIP };
+static const struct {
+  unsigned button;
+  unsigned axis;
+  float press;
+} axisButtons[] = {
+  { 0, 0, .75f }, // Trigger
+  { 3, 3, .80f } // Grip
+};
 
 _Static_assert(sizeof(paths) / sizeof(paths[0]) == OPENVR_INPUT_ACTION_COUNT, "action count");
 _Static_assert(sizeof(buttons) / sizeof(buttons[0]) == OPENVR_INPUT_BUTTON_COUNT, "button count");
@@ -58,10 +67,21 @@ const char* lovrOpenVRInputActionPath(uint32_t index) {
   return index < OPENVR_INPUT_ACTION_COUNT ? paths[index] : NULL;
 }
 
+static bool absoluteManifestPath(const char* path) {
+  if (!path) return false;
+  size_t root = lovrOpenVRAssetPathRootLength(path);
+#ifdef _WIN32
+  // A leading separator alone still depends on the process's current drive.
+  return root == 3 && path[root];
+#else
+  return root && path[root];
+#endif
+}
+
 EVRInputError lovrOpenVRInputInit(OpenVRInput* input, struct VR_IVRInput_FnTable* api, const char* manifestPath) {
   if (!input) return EVRInputError_VRInputError_InvalidParam;
   lovrOpenVRInputReset(input);
-  if (!api || !manifestPath || manifestPath[0] != '/' || !manifestPath[1] ||
+  if (!api || !absoluteManifestPath(manifestPath) ||
       !api->SetActionManifestPath || !api->GetActionSetHandle || !api->GetActionHandle ||
       !api->GetInputSourceHandle || !api->UpdateActionState || !api->GetDigitalActionData ||
       !api->GetAnalogActionData || !api->GetPoseActionDataRelativeToNow || !api->TriggerHapticVibrationAction) {
@@ -96,7 +116,19 @@ void lovrOpenVRInputClear(OpenVRInput* input) {
   if (input) memset(input->hands, 0, sizeof(input->hands));
 }
 
+void lovrOpenVRInputClearButtons(OpenVRInput* input) {
+  for (unsigned h = 0; h < 2; h++) {
+    OpenVRInputHand* hand = &input->hands[h];
+    memset(hand->buttons, 0, sizeof(hand->buttons));
+    memset(hand->touches, 0, sizeof(hand->touches));
+    memset(hand->axes, 0, sizeof(hand->axes));
+    memset(hand->axisButtons, 0, sizeof(hand->axisButtons));
+  }
+}
+
 EVRInputError lovrOpenVRInputUpdate(OpenVRInput* input, ETrackingUniverseOrigin origin, float prediction) {
+  OpenVRInputHand previous[2];
+  if (input) memcpy(previous, input->hands, sizeof(previous));
   lovrOpenVRInputClear(input);
   if (!input || !input->api) return EVRInputError_VRInputError_InvalidHandle;
   if (!isfinite(prediction) || (origin != ETrackingUniverseOrigin_TrackingUniverseSeated &&
@@ -128,7 +160,23 @@ EVRInputError lovrOpenVRInputUpdate(OpenVRInput* input, ETrackingUniverseOrigin 
       InputAnalogActionData_t* data = &hand->axes[i];
       error = input->api->GetAnalogActionData(input->actions[action], data, sizeof(*data), input->sources[h]);
       if (error && !firstError) firstError = error;
-      if (error || !data->bActive) memset(data, 0, sizeof(*data));
+      if (error || !data->bActive || !isfinite(data->x) || !isfinite(data->y)) memset(data, 0, sizeof(*data));
+    }
+    for (unsigned i = 0; i < sizeof(axisButtons) / sizeof(axisButtons[0]); i++) {
+      unsigned button = axisButtons[i].button;
+      const InputAnalogActionData_t* axis = &hand->axes[axisButtons[i].axis];
+      if (hand->buttons[button].bActive || !axis->bActive) continue;
+      const InputDigitalActionData_t* prior = &previous[h].buttons[button];
+      if (!prior->bActive) prior = &previous[h].axisButtons[i];
+      bool held = prior->bActive && prior->bState;
+      bool down = axis->x >= (held ? .70f : axisButtons[i].press);
+      hand->axisButtons[i] = (InputDigitalActionData_t) {
+        .bActive = true,
+        .activeOrigin = axis->activeOrigin,
+        .bState = down,
+        .bChanged = held != down,
+        .fUpdateTime = axis->fUpdateTime
+      };
     }
     if (!hand->poses[0].bActive && !hand->poses[1].bActive) memset(hand, 0, sizeof(*hand));
   }
@@ -189,6 +237,11 @@ bool lovrOpenVRInputIsDown(const OpenVRInput* input, Device device, DeviceButton
   int hand = getHand(device), index = getButton(button);
   if (!input || !input->api || hand < 0 || index < 0) return false;
   const InputDigitalActionData_t* data = &input->hands[hand].buttons[index];
+  if (!data->bActive) {
+    for (unsigned i = 0; i < sizeof(axisButtons) / sizeof(axisButtons[0]); i++) {
+      if (axisButtons[i].button == (unsigned) index) data = &input->hands[hand].axisButtons[i];
+    }
+  }
   if (!data->bActive) return false;
   *down = data->bState;
   *changed = data->bChanged;

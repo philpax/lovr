@@ -3,6 +3,7 @@
 #include "graphics/graphics.h"
 #include "headset/headset.h"
 #include "headset/headset_ops.h"
+#include "headset/openvr_assets.h"
 #include "headset/openvr_diagnostic.h"
 #include "util.h"
 #include <inttypes.h>
@@ -12,6 +13,7 @@
 
 static uint32_t expectedScenePID;
 static uint32_t framesPerSession = 120;
+static bool useCurrentScene;
 static double deadline;
 static bool osQuit;
 
@@ -49,26 +51,41 @@ static bool positiveInteger(const char* text, uint32_t maximum, uint32_t* value)
 }
 
 static bool arguments(int argc, char** argv) {
-  bool seenPID = false, seenFrames = false;
-  for (int i = 1; i < argc; i += 2) {
-    if (i + 1 >= argc) return false;
-    if (!strcmp(argv[i], "--expected-scene-pid") && !seenPID) {
-      if (!positiveInteger(argv[i + 1], UINT32_MAX, &expectedScenePID)) return false;
-      seenPID = true;
+  bool seenFrames = false;
+  for (int i = 1; i < argc; i++) {
+    if (!strcmp(argv[i], "--current-scene") && !useCurrentScene && !expectedScenePID) {
+      useCurrentScene = true;
+    } else if (!strcmp(argv[i], "--expected-scene-pid") && !useCurrentScene && !expectedScenePID) {
+      if (++i >= argc || !positiveInteger(argv[i], UINT32_MAX, &expectedScenePID)) return false;
     } else if (!strcmp(argv[i], "--frames-per-session") && !seenFrames) {
-      if (!positiveInteger(argv[i + 1], 120, &framesPerSession)) return false;
+      if (++i >= argc || !positiveInteger(argv[i], 900, &framesPerSession)) return false;
       seenFrames = true;
     } else {
       return false;
     }
   }
-  return seenPID;
+  return expectedScenePID || useCurrentScene;
+}
+
+static int checkActionAssets(void) {
+  OpenVRAssetsResult assets = lovrOpenVRAssetsResolve(true, NULL);
+  if (assets.status != OPENVR_ASSETS_OK_PATHS_NOT_PINNED) {
+    fprintf(stderr, "openvr coexistence: action assets status %d at %s (OS error %d)\n",
+      assets.status, assets.failingPath, assets.osError);
+    return 1;
+  }
+  fprintf(stderr, "openvr coexistence: verified action assets at %s\n", assets.manifest);
+  return 0;
 }
 
 static bool observe(OpenVRDiagnosticObservation* observation) {
   if (!withinDeadline()) return false;
   if (!lovrOpenVRDiagnosticObserve(observation)) return fail("runtime observation");
-  if (!observation->connected || observation->currentScenePID != expectedScenePID) {
+  if (!expectedScenePID && useCurrentScene && observation->connected && observation->currentScenePID) {
+    expectedScenePID = observation->currentScenePID;
+    fprintf(stderr, "openvr coexistence: watching scene PID %" PRIu32 "\n", expectedScenePID);
+  }
+  if (!expectedScenePID || !observation->connected || observation->currentScenePID != expectedScenePID) {
     lovrSetError("blocked prerequisite or coexistence failure: expected scene PID %" PRIu32 ", sampled %" PRIu32 ", connected %d",
       expectedScenePID, observation->currentScenePID, observation->connected);
     return fail("scene application oracle");
@@ -130,8 +147,8 @@ static bool session(uint32_t index, uint32_t* previousGeneration, Layer** ownedL
     Pass* pass = lovrLayerGetPass(*ownedLayer);
     if (!pass || !lovrLayerGetTexture(*ownedLayer)) return fail("managed panel render target");
     LoadAction loads[4] = { LOAD_CLEAR, LOAD_DISCARD, LOAD_DISCARD, LOAD_DISCARD };
-    float clears[4][4] = { { .1f, .025f, .2f, .25f } };
-    clears[0][0] = frame % 2 ? .025f : .1f;
+    float clears[4][4] = { { .05f, .2f, .6f, .9f } };
+    clears[0][0] = (frame / 30) % 2 ? .45f : .05f;
     if (!lovrPassSetClear(pass, loads, clears, LOAD_CLEAR, 0.f)) return fail("panel clear pass");
     if (!lovrGraphicsSubmit(&pass, 1)) return fail("managed graphics submit");
     if (!lovrHeadsetSubmit()) return fail("overlay texture submission");
@@ -161,8 +178,10 @@ static bool session(uint32_t index, uint32_t* previousGeneration, Layer** ownedL
 }
 
 int main(int argc, char** argv) {
+  if (argc == 2 && !strcmp(argv[1], "--check-action-assets")) return checkActionAssets();
   if (!arguments(argc, argv)) {
-    fprintf(stderr, "openvr coexistence: usage: --expected-scene-pid <1..4294967295> [--frames-per-session <1..120>]\n");
+    fprintf(stderr, "openvr coexistence: usage: --check-action-assets | (--current-scene | "
+      "--expected-scene-pid <1..4294967295>) [--frames-per-session <1..900>]\n");
     return 2;
   }
   if (!os_init()) {

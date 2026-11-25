@@ -32,7 +32,7 @@ option(LOVR_LUAU_CODEGEN "Link Luau's native code generator into the library" OF
 option(LOVR_USE_GLSLANG "Use glslang to compile GLSL shaders" ON)
 option(LOVR_USE_VULKAN "Use the Vulkan renderer" ON)
 option(LOVR_USE_WEBGPU "Use the WebGPU renderer" OFF)
-option(LOVR_ENABLE_OPENVR "Build the optional Linux Vulkan OpenVR loader" OFF)
+option(LOVR_ENABLE_OPENVR "Build the optional Vulkan OpenVR backend" OFF)
 option(LOVR_USE_STEAM_AUDIO "Use Steam Audio for audio spatialization" ON)
 option(LOVR_USE_TINCTURE "Use tincture to compile shaders" OFF)
 
@@ -54,6 +54,7 @@ option(LOVR_BUILD_BUNDLE "On macOS, build a .app bundle instead of a raw program
 option(LOVR_BUILD_WITH_SYMBOLS "Build with C function symbols exposed" OFF)
 
 set(LOVR_PROJECT "${PROJECT_SOURCE_DIR}/etc/nogame" CACHE STRING "The project folder to fuse to the build")
+set(LOVR_EMBEDDED_ANALYSIS_SOURCE "" CACHE FILEPATH "Optional source using Luau analysis inside the LÖVR library")
 
 # Setup
 if(EMSCRIPTEN)
@@ -195,7 +196,7 @@ else()
       add_library(lua SHARED ${LUA_SRC})
     endif()
     target_include_directories(lua INTERFACE deps/lua)
-    if(MSVC)
+    if(WIN32)
       target_compile_definitions(lua PRIVATE LUA_BUILD_AS_DLL)
       target_compile_definitions(lua PRIVATE _CRT_SECURE_NO_WARNINGS)
     else()
@@ -297,7 +298,12 @@ if(LOVR_ENABLE_HEADSET AND NOT EMSCRIPTEN)
     list(APPEND LOVR_LIB_DIRS ${OPENXR_LIBRARY_DIRS})
     set(LOVR_OPENXR ${OPENXR_LIBRARIES})
   else()
-    set(DYNAMIC_LOADER ON CACHE BOOL "")
+    if(MINGW)
+      # The OpenXR SDK applies an ELF export map to shared MinGW builds.
+      set(DYNAMIC_LOADER OFF CACHE BOOL "Build OpenXR as a shared library")
+    else()
+      set(DYNAMIC_LOADER ON CACHE BOOL "")
+    endif()
     set(BUILD_WITH_WAYLAND_HEADERS OFF CACHE BOOL "")
     add_subdirectory(deps/openxr openxr EXCLUDE_FROM_ALL)
     set(LOVR_OPENXR openxr_loader)
@@ -305,35 +311,47 @@ if(LOVR_ENABLE_HEADSET AND NOT EMSCRIPTEN)
 endif()
 
 if(LOVR_ENABLE_OPENVR)
-  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR ANDROID OR NOT LOVR_USE_VULKAN OR NOT LOVR_ENABLE_HEADSET)
-    message(FATAL_ERROR "LOVR_ENABLE_OPENVR requires the Linux Vulkan headset module")
+  if(NOT (WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux") OR NOT LOVR_USE_VULKAN OR NOT LOVR_ENABLE_HEADSET)
+    message(FATAL_ERROR "LOVR_ENABLE_OPENVR requires the Vulkan headset module on Linux or Windows")
   endif()
-  add_library(lovr_openvr_loader STATIC
-    deps/openvr/src/openvr_api_public.cpp
-    deps/openvr/src/jsoncpp.cpp
-    deps/openvr/src/vrcore/dirtools_public.cpp
-    deps/openvr/src/vrcore/envvartools_public.cpp
-    deps/openvr/src/vrcore/pathtools_public.cpp
-    deps/openvr/src/vrcore/sharedlibtools_public.cpp
-    deps/openvr/src/vrcore/hmderrors_public.cpp
-    deps/openvr/src/vrcore/vrpathregistry_public.cpp
-    deps/openvr/src/vrcore/strtools_public.cpp
-  )
-  target_include_directories(lovr_openvr_loader SYSTEM PUBLIC deps/openvr/headers)
-  target_include_directories(lovr_openvr_loader PRIVATE deps/openvr/src deps/openvr/src/vrcore)
-  target_compile_definitions(lovr_openvr_loader PRIVATE VR_API_PUBLIC VRCORE_NO_PLATFORM LINUX POSIX)
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-    target_compile_definitions(lovr_openvr_loader PRIVATE LINUXARM64)
-  elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    target_compile_definitions(lovr_openvr_loader PRIVATE LINUX64)
+  if(WIN32)
+    if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR CMAKE_C_COMPILER_ARCHITECTURE_ID MATCHES "^(ARM|arm|aarch64)")
+      message(FATAL_ERROR "LOVR_ENABLE_OPENVR on Windows requires an x64 build")
+    endif()
+    add_library(lovr_openvr_loader SHARED IMPORTED)
+    set_target_properties(lovr_openvr_loader PROPERTIES
+      IMPORTED_IMPLIB "${CMAKE_CURRENT_SOURCE_DIR}/deps/openvr/lib/win64/openvr_api.lib"
+      IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/deps/openvr/bin/win64/openvr_api.dll"
+    )
+    target_include_directories(lovr_openvr_loader SYSTEM INTERFACE deps/openvr/headers)
+  else()
+    add_library(lovr_openvr_loader STATIC
+      deps/openvr/src/openvr_api_public.cpp
+      deps/openvr/src/jsoncpp.cpp
+      deps/openvr/src/vrcore/dirtools_public.cpp
+      deps/openvr/src/vrcore/envvartools_public.cpp
+      deps/openvr/src/vrcore/pathtools_public.cpp
+      deps/openvr/src/vrcore/sharedlibtools_public.cpp
+      deps/openvr/src/vrcore/hmderrors_public.cpp
+      deps/openvr/src/vrcore/vrpathregistry_public.cpp
+      deps/openvr/src/vrcore/strtools_public.cpp
+    )
+    target_include_directories(lovr_openvr_loader SYSTEM PUBLIC deps/openvr/headers)
+    target_include_directories(lovr_openvr_loader PRIVATE deps/openvr/src deps/openvr/src/vrcore)
+    target_compile_definitions(lovr_openvr_loader PRIVATE VR_API_PUBLIC VRCORE_NO_PLATFORM LINUX POSIX)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+      target_compile_definitions(lovr_openvr_loader PRIVATE LINUXARM64)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+      target_compile_definitions(lovr_openvr_loader PRIVATE LINUX64)
+    endif()
+    set_target_properties(lovr_openvr_loader PROPERTIES
+      CXX_STANDARD 11
+      CXX_STANDARD_REQUIRED ON
+      POSITION_INDEPENDENT_CODE ON
+      CXX_VISIBILITY_PRESET hidden
+    )
+    target_link_libraries(lovr_openvr_loader PRIVATE ${CMAKE_DL_LIBS})
   endif()
-  set_target_properties(lovr_openvr_loader PROPERTIES
-    CXX_STANDARD 11
-    CXX_STANDARD_REQUIRED ON
-    POSITION_INDEPENDENT_CODE ON
-    CXX_VISIBILITY_PRESET hidden
-  )
-  target_link_libraries(lovr_openvr_loader PRIVATE ${CMAKE_DL_LIBS})
   add_library(lovr_openvr_runtime STATIC src/modules/headset/openvr_runtime.c)
   target_include_directories(lovr_openvr_runtime PUBLIC src/modules)
   target_link_libraries(lovr_openvr_runtime PUBLIC lovr_openvr_loader)
@@ -448,6 +466,13 @@ endif()
 
 if(LOVR_BUILD_WITH_SYMBOLS)
   set_target_properties(lovr PROPERTIES C_VISIBILITY_PRESET "default")
+  if(WIN32 AND LOVR_BUILD_SHARED)
+    if(MSVC)
+      set_target_properties(lovr PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    else()
+      target_link_options(lovr PRIVATE "LINKER:--export-all-symbols")
+    endif()
+  endif()
 else()
   set_target_properties(lovr PROPERTIES C_VISIBILITY_PRESET "hidden")
 endif()
@@ -487,6 +512,7 @@ if(LOVR_ENABLE_OPENVR)
     ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_knuckles.json
     ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_oculus_touch.json
     ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_frame_controller.json
+    ${CMAKE_CURRENT_SOURCE_DIR}/etc/openvr/bindings_vd_hand_controller.json
   )
   set(openvr_asset_directory "$<TARGET_FILE_DIR:lovr>/lovr-openvr")
   add_custom_command(TARGET lovr POST_BUILD
@@ -495,7 +521,15 @@ if(LOVR_ENABLE_OPENVR)
     VERBATIM
   )
   set_property(TARGET lovr APPEND PROPERTY LINK_DEPENDS ${openvr_assets})
-  target_link_options(lovr PRIVATE "LINKER:--exclude-libs,liblovr_openvr_loader.a")
+  if(WIN32)
+    target_link_libraries(lovr advapi32)
+    add_custom_command(TARGET lovr POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:lovr_openvr_loader> $<TARGET_FILE_DIR:lovr>
+      VERBATIM
+    )
+  else()
+    target_link_options(lovr PRIVATE "LINKER:--exclude-libs,liblovr_openvr_loader.a")
+  endif()
 endif()
 
 if(LOVR_BUILD_OPENVR_COEXISTENCE)
@@ -506,8 +540,14 @@ if(LOVR_BUILD_OPENVR_COEXISTENCE)
   add_executable(lovr_openvr_coexistence test/runtime/openvr_coexistence.c)
   target_compile_definitions(lovr_openvr_coexistence PRIVATE LOVR_ENABLE_OPENVR_DIAGNOSTIC)
   target_include_directories(lovr_openvr_coexistence PRIVATE src src/modules)
-  target_link_libraries(lovr_openvr_coexistence PRIVATE lovr m)
-  set_target_properties(lovr_openvr_coexistence PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime-tests")
+  target_link_libraries(lovr_openvr_coexistence PRIVATE lovr)
+  set_target_properties(lovr_openvr_coexistence PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  if(WIN32)
+    add_dependencies(lovr_openvr_coexistence move_files)
+  else()
+    target_link_libraries(lovr_openvr_coexistence PRIVATE m)
+    set_target_properties(lovr_openvr_coexistence PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/runtime-tests")
+  endif()
 endif()
 
 target_link_libraries(lovr
@@ -530,13 +570,13 @@ if(LOVR_USE_LUAU AND LOVR_EXPORT_LUA_SYMBOLS)
   # drops the archive members that define them and the exports go with them;
   # `--undefined=` forces each member in, and the default visibility
   # (`ENABLE_EXPORTS`) exports it.
-  target_link_options(lovr PRIVATE
-    "-Wl,--undefined=lua_error"
-    "-Wl,--undefined=lua_getmetatablepointer"
-    "-Wl,--undefined=lua_gcdump"
-    "-Wl,--undefined=luarequire_pushproxyrequire"
-    "-Wl,--undefined=lua_vm_is_topframe"
-  )
+  foreach(symbol lua_error lua_getmetatablepointer lua_gcdump luarequire_pushproxyrequire lua_vm_is_topframe)
+    if(MSVC)
+      target_link_options(lovr PRIVATE "/INCLUDE:${symbol}")
+    else()
+      target_link_options(lovr PRIVATE "LINKER:--undefined=${symbol}")
+    endif()
+  endforeach()
 endif()
 
 set(LOVR_LUAU_WHOLE_ARCHIVES)
@@ -559,8 +599,21 @@ if(LOVR_USE_LUAU AND LOVR_LUAU_ANALYSIS)
 endif()
 
 if(LOVR_LUAU_WHOLE_ARCHIVES)
-  # One group keeps CMake option de-duplication from stripping repeated archive delimiters.
-  target_link_options(lovr PRIVATE "-Wl,--whole-archive" ${LOVR_LUAU_WHOLE_ARCHIVES} "-Wl,--no-whole-archive")
+  if(MSVC)
+    foreach(archive IN LISTS LOVR_LUAU_WHOLE_ARCHIVES)
+      target_link_options(lovr PRIVATE "/WHOLEARCHIVE:${archive}")
+    endforeach()
+  else()
+    # One group keeps CMake option de-duplication from stripping repeated archive delimiters.
+    target_link_options(lovr PRIVATE "-Wl,--whole-archive" ${LOVR_LUAU_WHOLE_ARCHIVES} "-Wl,--no-whole-archive")
+  endif()
+endif()
+
+if(LOVR_EMBEDDED_ANALYSIS_SOURCE)
+  if(NOT LOVR_USE_LUAU OR NOT LOVR_LUAU_ANALYSIS)
+    message(FATAL_ERROR "Embedding an analysis source requires Luau analysis")
+  endif()
+  target_sources(lovr PRIVATE "${LOVR_EMBEDDED_ANALYSIS_SOURCE}")
 endif()
 
 if(LOVR_SANITIZE)
@@ -873,6 +926,7 @@ endif()
 # Platforms
 if(WIN32)
   target_sources(lovr PRIVATE src/core/os_win32.c etc/lovr.rc)
+  target_link_libraries(lovr dwmapi)
   if(MSVC)
     target_compile_options(lovr PRIVATE /wd4244 /experimental:c11atomics)
     # Excuse anonymous union for type punning
@@ -886,6 +940,11 @@ if(WIN32)
     endif()
   else()
     set_target_properties(lovr PROPERTIES COMPILE_FLAGS "-MP")
+  endif()
+  if(MINGW)
+    target_compile_definitions(lovr PRIVATE __STDC_NO_THREADS__=1)
+    target_include_directories(lovr PRIVATE ${PROJECT_SOURCE_DIR}/src/lib/std)
+    target_link_libraries(lovr pthread)
   endif()
   target_compile_definitions(lovr PRIVATE _CRT_SECURE_NO_WARNINGS)
   target_compile_definitions(lovr PRIVATE _CRT_NONSTDC_NO_WARNINGS)

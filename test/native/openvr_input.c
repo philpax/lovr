@@ -2,13 +2,19 @@
 #include "headset/openvr_input.h"
 #include <math.h>
 
+#ifdef _WIN32
+static const char* manifestPath = "C:\\installed\\actions.json";
+#else
+static const char* manifestPath = "/installed/actions.json";
+#endif
+
 static struct {
   unsigned calls, failAt, zeroAt, updates, reads, failRead, haptics;
-  bool valid, active, connected, invalidPose, down, changed;
+  bool valid, active, connected, invalidPose, down, changed, analogOnly;
   EVRInputError updateError, readError, hapticError;
   VRActionHandle_t haptic;
   VRInputValueHandle_t restriction;
-  float strength, duration, frequency;
+  float strength, duration, frequency, axis;
 } fake;
 
 static EVRInputError step(void) {
@@ -17,7 +23,7 @@ static EVRInputError step(void) {
 }
 
 static EVRInputError OPENVR_FNTABLE_CALLTYPE manifest(char* path) {
-  fake.valid &= fake.calls == 0 && strcmp(path, "/installed/actions.json") == 0;
+  fake.valid &= fake.calls == 0 && strcmp(path, manifestPath) == 0;
   return step();
 }
 
@@ -75,7 +81,7 @@ static EVRInputError OPENVR_FNTABLE_CALLTYPE digital(VRActionHandle_t handle, In
     uint32_t size, VRInputValueHandle_t restriction) {
   readCheck(handle, restriction, 2, 2 * OPENVR_INPUT_BUTTON_COUNT);
   fake.valid &= size == sizeof(*data);
-  data->bActive = fake.active;
+  data->bActive = fake.active && !fake.analogOnly;
   data->bState = fake.down;
   data->bChanged = fake.changed;
   return fake.failRead && fake.reads == fake.failRead ? EVRInputError_VRInputError_IPCError : fake.readError;
@@ -86,7 +92,7 @@ static EVRInputError OPENVR_FNTABLE_CALLTYPE analog(VRActionHandle_t handle, Inp
   readCheck(handle, restriction, 2 + 2 * OPENVR_INPUT_BUTTON_COUNT, OPENVR_INPUT_AXIS_COUNT);
   fake.valid &= size == sizeof(*data);
   data->bActive = fake.active;
-  data->x = .7f;
+  data->x = fake.axis;
   data->y = -.3f;
   return fake.failRead && fake.reads == fake.failRead ? EVRInputError_VRInputError_IPCError : fake.readError;
 }
@@ -112,6 +118,7 @@ static struct VR_IVRInput_FnTable api = {
 static void resetFake(void) {
   memset(&fake, 0, sizeof(fake));
   fake.valid = fake.active = fake.connected = true;
+  fake.axis = .7f;
 }
 
 static bool initialization(void) {
@@ -120,15 +127,19 @@ static bool initialization(void) {
     resetFake();
     fake.failAt = failure;
     memset(&input, 0xff, sizeof(input));
-    CHECK(lovrOpenVRInputInit(&input, &api, "/installed/actions.json") == EVRInputError_VRInputError_NameNotFound);
+    CHECK(lovrOpenVRInputInit(&input, &api, manifestPath) == EVRInputError_VRInputError_NameNotFound);
     OpenVRInput empty = { 0 };
     CHECK(memcmp(&input, &empty, sizeof(input)) == 0);
     CHECK(fake.calls == failure && fake.valid && fake.updates == 0);
   }
   resetFake();
   CHECK(lovrOpenVRInputInit(&input, &api, "relative.json") == EVRInputError_VRInputError_InvalidParam);
+#ifdef _WIN32
+  CHECK(lovrOpenVRInputInit(&input, &api, "C:actions.json") == EVRInputError_VRInputError_InvalidParam);
+  CHECK(lovrOpenVRInputInit(&input, &api, "/actions.json") == EVRInputError_VRInputError_InvalidParam);
+#endif
   CHECK(fake.calls == 0);
-  CHECK(lovrOpenVRInputInit(&input, &api, "/installed/actions.json") == 0);
+  CHECK(lovrOpenVRInputInit(&input, &api, manifestPath) == 0);
   CHECK(fake.valid && fake.calls == 4 + OPENVR_INPUT_ACTION_COUNT);
   CHECK(strcmp(lovrOpenVRInputActionPath(0), "/actions/lovr/in/grip_pose") == 0);
   CHECK(strcmp(lovrOpenVRInputActionPath(1), "/actions/lovr/in/aim_pose") == 0);
@@ -137,11 +148,11 @@ static bool initialization(void) {
   CHECK(lovrOpenVRInputActionPath(OPENVR_INPUT_ACTION_COUNT) == NULL);
   resetFake();
   fake.zeroAt = 3;
-  CHECK(lovrOpenVRInputInit(&input, &api, "/installed/actions.json") == EVRInputError_VRInputError_InvalidHandle);
+  CHECK(lovrOpenVRInputInit(&input, &api, manifestPath) == EVRInputError_VRInputError_InvalidHandle);
   CHECK(input.api == NULL && input.actionSet == 0 && input.actions[0] == 0);
   struct VR_IVRInput_FnTable incomplete = api;
   incomplete.GetAnalogActionData = NULL;
-  CHECK(lovrOpenVRInputInit(&input, &incomplete, "/installed/actions.json") == EVRInputError_VRInputError_InvalidParam);
+  CHECK(lovrOpenVRInputInit(&input, &incomplete, manifestPath) == EVRInputError_VRInputError_InvalidParam);
   lovrOpenVRInputReset(&input);
   CHECK(lovrOpenVRInputUpdate(&input, ETrackingUniverseOrigin_TrackingUniverseStanding, .02f) == EVRInputError_VRInputError_InvalidHandle);
   return true;
@@ -150,7 +161,7 @@ static bool initialization(void) {
 static bool snapshots(void) {
   resetFake();
   OpenVRInput input;
-  CHECK(lovrOpenVRInputInit(&input, &api, "/installed/actions.json") == 0);
+  CHECK(lovrOpenVRInputInit(&input, &api, manifestPath) == 0);
   bool down, changed, touched;
   float axis[2], p[3], q[4], v[3], w[3];
   fake.down = fake.changed = true;
@@ -213,7 +224,7 @@ static bool snapshots(void) {
 static bool scalarAxes(void) {
   resetFake();
   OpenVRInput input;
-  CHECK(lovrOpenVRInputInit(&input, &api, "/installed/actions.json") == 0);
+  CHECK(lovrOpenVRInputInit(&input, &api, manifestPath) == 0);
   CHECK(lovrOpenVRInputUpdate(&input, ETrackingUniverseOrigin_TrackingUniverseStanding, .02f) == 0);
   DeviceAxis scalar[] = { AXIS_TRIGGER, AXIS_GRIP, AXIS_NIB, AXIS_THUMBREST, MAX_AXES, (DeviceAxis) -1 };
   for (unsigned i = 0; i < sizeof(scalar) / sizeof(scalar[0]); i++) {
@@ -235,7 +246,7 @@ static bool scalarAxes(void) {
 static bool malformedTracking(void) {
   resetFake();
   OpenVRInput input;
-  CHECK(lovrOpenVRInputInit(&input, &api, "/installed/actions.json") == 0);
+  CHECK(lovrOpenVRInputInit(&input, &api, manifestPath) == 0);
   CHECK(lovrOpenVRInputUpdate(&input, ETrackingUniverseOrigin_TrackingUniverseStanding, .02f) == 0);
   InputPoseActionData_t valid = input.hands[0].poses[0];
   for (unsigned kind = 0; kind < 5; kind++) {
@@ -263,10 +274,47 @@ static bool malformedTracking(void) {
   return true;
 }
 
+static bool analogButtons(void) {
+  resetFake();
+  OpenVRInput input;
+  CHECK(lovrOpenVRInputInit(&input, &api, manifestPath) == 0);
+  Device hand = DEVICE_HAND_LEFT_POINT;
+  ETrackingUniverseOrigin origin = ETrackingUniverseOrigin_TrackingUniverseStanding;
+  bool down, changed;
+  fake.analogOnly = true;
+  fake.axis = .76f;
+  CHECK(lovrOpenVRInputUpdate(&input, origin, .02f) == 0);
+  CHECK(lovrOpenVRInputIsDown(&input, hand, BUTTON_TRIGGER, &down, &changed) && down && changed);
+  CHECK(lovrOpenVRInputIsDown(&input, hand, BUTTON_GRIP, &down, &changed) && !down && !changed);
+  CHECK(!lovrOpenVRInputIsDown(&input, hand, BUTTON_THUMBSTICK, &down, &changed));
+  fake.axis = .72f;
+  CHECK(lovrOpenVRInputUpdate(&input, origin, .02f) == 0);
+  CHECK(lovrOpenVRInputIsDown(&input, hand, BUTTON_TRIGGER, &down, &changed) && down && !changed);
+  fake.axis = .69f;
+  CHECK(lovrOpenVRInputUpdate(&input, origin, .02f) == 0);
+  CHECK(lovrOpenVRInputIsDown(&input, hand, BUTTON_TRIGGER, &down, &changed) && !down && changed);
+  fake.axis = 1.f;
+  fake.analogOnly = false;
+  CHECK(lovrOpenVRInputUpdate(&input, origin, .02f) == 0);
+  CHECK(lovrOpenVRInputIsDown(&input, hand, BUTTON_TRIGGER, &down, &changed) && !down && !changed);
+  fake.analogOnly = true;
+  CHECK(lovrOpenVRInputUpdate(&input, origin, .02f) == 0);
+  CHECK(lovrOpenVRInputIsDown(&input, hand, BUTTON_GRIP, &down, &changed) && down && changed);
+  lovrOpenVRInputClearButtons(&input);
+  fake.axis = .72f;
+  CHECK(lovrOpenVRInputUpdate(&input, origin, .02f) == 0);
+  CHECK(lovrOpenVRInputIsDown(&input, hand, BUTTON_GRIP, &down, &changed) && !down && !changed);
+  fake.axis = NAN;
+  CHECK(lovrOpenVRInputUpdate(&input, origin, .02f) == 0);
+  CHECK(!lovrOpenVRInputIsDown(&input, hand, BUTTON_TRIGGER, &down, &changed));
+  CHECK(fake.valid);
+  return true;
+}
+
 static bool haptics(void) {
   resetFake();
   OpenVRInput input;
-  CHECK(lovrOpenVRInputInit(&input, &api, "/installed/actions.json") == 0);
+  CHECK(lovrOpenVRInputInit(&input, &api, manifestPath) == 0);
   CHECK(lovrOpenVRInputVibrate(&input, DEVICE_HAND_RIGHT, .4f, .25f, 120.f) == 0);
   CHECK(fake.valid && fake.haptic == 200 + OPENVR_INPUT_ACTION_COUNT - 1 && fake.restriction == 301);
   CHECK(fake.strength == .4f && fake.duration == .25f && fake.frequency == 120.f);
@@ -287,6 +335,7 @@ int main(int argc, char** argv) {
     { "openvr.input.initialization", initialization },
     { "openvr.input.action-snapshot-transitions", snapshots },
     { "openvr.input.scalar-axis-canary", scalarAxes },
+    { "openvr.input.analog-buttons", analogButtons },
     { "openvr.input.malformed-tracking", malformedTracking },
     { "openvr.input.haptic-action-routing", haptics }
   };

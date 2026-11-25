@@ -4,7 +4,7 @@
 #include <stdatomic.h>
 
 #ifdef _WIN32
-#define THREAD_LOCAL __declspec(thread)
+#define THREAD_LOCAL thread_local
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else

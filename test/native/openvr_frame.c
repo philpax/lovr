@@ -13,7 +13,7 @@ static struct {
   EVROverlayError error;
   ETrackedPropertyError propertyError;
   float frequency, vsync, photons, prediction;
-  bool timing;
+  bool timing, currentPoseOnly;
   uint32_t width, height;
   TrackedDevicePose_t head;
   HmdMatrix34_t eyes[2];
@@ -64,6 +64,7 @@ static void OPENVR_FNTABLE_CALLTYPE poses(ETrackingUniverseOrigin origin, float 
   fake.poses++;
   fake.prediction = prediction;
   output[0] = fake.head;
+  if (fake.currentPoseOnly && prediction != 0.f) output[0].bPoseIsValid = false;
 }
 
 static HmdMatrix34_t OPENVR_FNTABLE_CALLTYPE eye(EVREye eye) {
@@ -275,6 +276,11 @@ static bool invalidInputs(void) {
   CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.).status == OPENVR_FRAME_OK);
   CHECK(frame.snapshot.prediction >= .01f + fake.photons && frame.snapshot.prediction <= .02f + fake.photons);
   frame = setup();
+  fake.vsync = -.008f;
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.).status == OPENVR_FRAME_OK);
+  CHECK(frame.snapshot.head.valid && frame.snapshot.eyes[0].pose.valid && frame.snapshot.eyes[1].pose.valid);
+  CHECK(closeTo(frame.snapshot.prediction, .021));
+  frame = setup();
   fake.frequency = 1.f;
   CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.).status == OPENVR_FRAME_OK);
   CHECK(fake.timeout == 100);
@@ -292,6 +298,18 @@ static bool invalidInputs(void) {
   frame = setup();
   CHECK(lovrOpenVRFrameUpdate(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, NULL, NULL).status == OPENVR_FRAME_INVALID);
   CHECK(fake.waits == 0 && fake.clocks == 0);
+  return true;
+}
+
+static bool currentTrackingFallback(void) {
+  OpenVRFrame frame = setup();
+  fake.currentPoseOnly = true;
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.).status == OPENVR_FRAME_OK);
+  CHECK(fake.poses == 2 && fake.prediction == 0.f && frame.snapshot.prediction > 0.f);
+  CHECK(frame.snapshot.head.valid && frame.snapshot.eyes[0].pose.valid && frame.snapshot.eyes[1].pose.valid);
+  fake.head.bDeviceIsConnected = false;
+  CHECK(updateAt(&frame, ETrackingUniverseOrigin_TrackingUniverseStanding, 10.02).status == OPENVR_FRAME_OK);
+  CHECK(fake.poses == 3 && !frame.snapshot.head.valid && !frame.snapshot.eyes[0].pose.valid);
   return true;
 }
 
@@ -413,6 +431,7 @@ static bool timingStats(void) {
 int main(int argc, char** argv) {
   NativeTest tests[] = {
     { "predicted_pose_conversion", predictedPose },
+    { "current_tracking_fallback", currentTrackingFallback },
     { "prediction_submission_work", submissionWork },
     { "frame_timing_stats", timingStats },
     { "overlay_frame_timeout", timeoutProgress },

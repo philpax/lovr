@@ -89,19 +89,37 @@ cmake --build .
 
 See the [Compiling Guide](https://lovr.org/docs/Compiling) for more info.
 
-The optional Linux Vulkan OpenVR connection foundation builds with `-DLOVR_ENABLE_OPENVR=ON`.
-It does not yet provide a selectable headset backend. The option defaults to off.
+The Vulkan OpenVR overlay backend builds on Linux and Windows x64 with `-DLOVR_ENABLE_OPENVR=ON`.
+The option defaults to off. Select it with `t.headset.backend = 'openvr'` and `t.headset.overlay = true`.
 `deps/openvr` pins Valve's OpenVR SDK 2.15.6 at `0924064316de3effbcd1acf1e309182a2deb1c05`.
-The static loader is built from the SDK sources into the CMake build directory, without a SteamVR installation.
+Linux builds the loader from SDK source. Windows stages the SDK DLL beside the LÖVR binary.
 The SDK's redistribution terms are in `deps/openvr/LICENSE`; binary distributions that enable the option must include them.
 Loading LÖVR does not initialize OpenVR. Connecting resolves the runtime through the SDK's runtime registry.
 The private adapter permits one process-wide connection. Its owning object must remain at a stable address
 and must not be copied or externally mutated. Loader callbacks must not reenter the adapter.
 Callers serialize function-table use against disconnect.
 
-Hardware-free native connection tests build with `-DLOVR_BUILD_HEADSET_TESTS=ON`.
+On Linux, hardware-free native connection tests build with `-DLOVR_BUILD_HEADSET_TESTS=ON`.
 Build the `headset_native_tests` target and run `ctest --test-dir <build-directory> --output-on-failure -L headset`.
 `-DLOVR_SANITIZE=ON` instruments the native test executables on supported compilers.
+
+#### OpenVR coexistence on Windows
+
+From a recursive checkout, configure with an x64 C and C++ toolchain and Python available to CMake.
+
+```powershell
+cmake -S . -B build-coexistence -DLOVR_ENABLE_OPENVR=ON -DLOVR_BUILD_OPENVR_COEXISTENCE=ON `
+  -DLOVR_BUILD_SHARED=ON -DLOVR_BUILD_WITH_SYMBOLS=ON -DLOVR_BUILD_EXE=OFF -DLOVR_USE_LUAJIT=OFF `
+  -DLOVR_ENABLE_AUDIO=OFF -DLOVR_ENABLE_PHYSICS=OFF -DLOVR_USE_STEAM_AUDIO=OFF
+cmake --build build-coexistence --config Debug --target lovr_openvr_coexistence
+```
+
+The executable, its DLLs, and the `lovr-openvr` directory belong together in a local directory whose ancestry
+other users cannot modify. Run `lovr_openvr_coexistence.exe --check-action-assets` to verify that layout without
+contacting SteamVR. With a VR game already running, use `--expected-scene-pid <pid>` to name it or
+`--current-scene` to use SteamVR's active scene. The harness submits a changing panel across two overlay sessions
+and checks the game PID, successful texture submission, and overlay retirement. An external runner should enforce
+a 90-second timeout on the harness process. Use `--frames-per-session 600` to leave more time to see the panel.
 
 Testing
 ---

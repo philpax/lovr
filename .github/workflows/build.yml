@@ -65,6 +65,26 @@ jobs:
           name: lovr-${{ matrix.arch }}.AppImage
           path: lovr-${{ matrix.arch }}.AppImage
 
+  headset-linux:
+    name: Linux native headset tests
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+      - name: Configure
+        run: >
+          cmake -B build-headset
+          -DLOVR_BUILD_HEADSET_TESTS=ON -DLOVR_ENABLE_OPENVR=ON
+          -DLOVR_BUILD_EXE=OFF -DLOVR_BUILD_SHARED=OFF
+          -DLOVR_ENABLE_AUDIO=OFF -DLOVR_ENABLE_DATA=OFF -DLOVR_ENABLE_PHYSICS=OFF
+          -DLOVR_USE_GLFW=OFF -DLOVR_USE_LUAJIT=OFF -DLOVR_USE_GLSLANG=ON -DLOVR_USE_STEAM_AUDIO=OFF
+      - name: Build
+        run: cmake --build build-headset --target headset_native_tests --parallel 2
+      - name: Test
+        run: ctest --test-dir build-headset --output-on-failure -L headset
+
   android:
     name: Android
     strategy:

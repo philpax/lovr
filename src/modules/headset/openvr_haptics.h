@@ -2,7 +2,7 @@
 #define LOVR_OPENVR_HAPTICS_H
 
 #include "headset.h"
-#include <openvr_capi.h>
+#include "openvr_api.h"
 
 #define OPENVR_HAPTICS_MAX_PULSE_SECONDS .02f
 #define OPENVR_HAPTICS_DEFAULT_FREQUENCY 120.f

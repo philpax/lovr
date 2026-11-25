@@ -20,6 +20,7 @@ set(asset_files
   "${asset_source}/bindings_knuckles.json"
   "${asset_source}/bindings_oculus_touch.json"
   "${asset_source}/bindings_frame_controller.json"
+  "${asset_source}/bindings_vd_hand_controller.json"
 )
 
 add_library(headset_openvr_assets_staged_library SHARED library.c

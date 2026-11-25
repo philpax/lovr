@@ -168,6 +168,10 @@
     {
       "controller_type": "frame_controller",
       "binding_url": "bindings_frame_controller.json"
+    },
+    {
+      "controller_type": "vd_hand_controller",
+      "binding_url": "bindings_vd_hand_controller.json"
     }
   ],
   "localization": [

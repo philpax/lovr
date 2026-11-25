@@ -612,7 +612,7 @@ static bool sceneCanvas(void) {
   CHECK(update() && vrState.inputSerial == vrState.frame.snapshot.serial);
   invalidTiming = true;
   actionsBefore = actionUpdates;
-  CHECK(update() && actionUpdates == actionsBefore && !vrState.inputSerial);
+  CHECK(update() && actionUpdates == actionsBefore + 1 && vrState.inputSerial == vrState.frame.snapshot.serial);
   invalidTiming = false;
   CHECK(update() && vrState.inputSerial == vrState.frame.snapshot.serial);
   activeInputPose = true;
@@ -1228,6 +1228,29 @@ static bool singleSampleScene(void) {
   return ok;
 }
 
+static bool inputWithoutHeadsetTiming(void) {
+  memset(&vrState, 0, sizeof(vrState));
+  HeadsetConfig config = { .overlay = true, .supersample = 1.f };
+  CHECK(init(&config) && connect() && start());
+  vrState.runtime.system = &runtimeSystem;
+  vrState.runtime.overlay = &runtimeAPI;
+  lovrOpenVRFrameInit(&vrState.frame, &runtimeSystem, &runtimeAPI);
+  frameNow = 1.;
+  invalidTiming = inputActive = inputDown = inputChanged = true;
+  unsigned before = actionUpdates;
+  CHECK(update() && actionUpdates == before + 1);
+  CHECK(vrState.inputSerial && vrState.inputSerial == vrState.frame.snapshot.serial);
+  CHECK(!vrState.frame.snapshot.head.valid && !vrState.frame.snapshot.eyes[0].pose.valid &&
+    !vrState.frame.snapshot.eyes[1].pose.valid);
+  bool value, changed;
+  float stick[2];
+  CHECK(down(DEVICE_HAND_LEFT, BUTTON_TRIGGER, &value, &changed) && value && changed);
+  CHECK(axis(DEVICE_HAND_RIGHT, AXIS_THUMBSTICK, stick) && stick[0] == .25f && stick[1] == -.75f);
+  invalidTiming = inputActive = inputDown = inputChanged = false;
+  CHECK(disconnect());
+  return true;
+}
+
 static bool scaledScene(void) {
   bool ok = true;
   for (unsigned samples = 1; samples <= 4 && ok; samples *= 4) {
@@ -1244,6 +1267,7 @@ static bool scaledScene(void) {
 int main(int argc, char** argv) {
   NativeTest tests[] = {
     { "openvr.backend.input-transitions", inputTransitions },
+    { "openvr.backend.input-without-headset-timing", inputWithoutHeadsetTiming },
     { "openvr.backend.retained-graphics", retainedGraphics },
     { "openvr.backend.panel-canvas", panelCanvas },
     { "openvr.backend.scene-canvas", sceneCanvas },

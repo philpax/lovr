@@ -2,7 +2,7 @@
 #define LOVR_OPENVR_INPUT_H
 
 #include "headset.h"
-#include <openvr_capi.h>
+#include "openvr_api.h"
 
 #define OPENVR_INPUT_BUTTON_COUNT 11
 #define OPENVR_INPUT_AXIS_COUNT 4
@@ -13,6 +13,7 @@ typedef struct OpenVRInputHand {
   InputDigitalActionData_t buttons[OPENVR_INPUT_BUTTON_COUNT];
   InputDigitalActionData_t touches[OPENVR_INPUT_BUTTON_COUNT];
   InputAnalogActionData_t axes[OPENVR_INPUT_AXIS_COUNT];
+  InputDigitalActionData_t axisButtons[2];
 } OpenVRInputHand;
 
 typedef struct OpenVRInput {
@@ -27,6 +28,7 @@ const char* lovrOpenVRInputActionPath(uint32_t index);
 EVRInputError lovrOpenVRInputInit(OpenVRInput* input, struct VR_IVRInput_FnTable* api, const char* manifestPath);
 void lovrOpenVRInputReset(OpenVRInput* input);
 void lovrOpenVRInputClear(OpenVRInput* input);
+void lovrOpenVRInputClearButtons(OpenVRInput* input);
 EVRInputError lovrOpenVRInputUpdate(OpenVRInput* input, ETrackingUniverseOrigin origin, float prediction);
 bool lovrOpenVRInputGetPose(const OpenVRInput* input, Device device, float* position, float* orientation);
 bool lovrOpenVRInputGetVelocity(const OpenVRInput* input, Device device, float* velocity, float* angularVelocity);

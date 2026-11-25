@@ -1,7 +1,7 @@
-#include "os.h"
 #define WINVER 0x0A00
 #define _WIN32_WINNT 0x0A00
 #define WIN32_LEAN_AND_MEAN
+#include "os.h"
 #include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -11,6 +11,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <threads.h>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -18,8 +19,8 @@
 #include "os_glfw.h"
 #endif
 
-static __declspec(thread) HANDLE timer;
-static __declspec(thread) bool createdTimer;
+static thread_local HANDLE timer;
+static thread_local bool createdTimer;
 
 static struct {
   HINSTANCE instance;

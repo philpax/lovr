@@ -9,7 +9,11 @@
 #include "headset/openvr_events.h"
 #include "headset/openvr_haptics.h"
 #include "event/event.h"
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 #include "headset/openvr_overlay.h"
 #include "headset/openvr_vulkan.h"
 #include "headset/openvr_frame.h"
@@ -25,6 +29,7 @@
 #include "util.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 extern const HeadsetOps lovrHeadsetOpenVROps;
@@ -60,6 +65,14 @@ static struct {
   OpenVRHaptics haptics;
   uint64_t inputSerial;
   bool inputReady;
+  struct {
+    bool enabled;
+    double next;
+    unsigned frames, noHead, noViews, invalidFrames, inputErrors;
+    bool down[2];
+    unsigned presses[2];
+    float stickPeak[2];
+  } inputTrace;
   struct {
     OpenVRProjection projection;
     Texture* texture;
@@ -363,6 +376,9 @@ static bool init(HeadsetConfig* config) {
   state.clipNear = .01f;
   state.clipFar = 0.f;
   state.main = true;
+  const char* trace = getenv("LOVR_OPENVR_INPUT_TRACE");
+  memset(&state.inputTrace, 0, sizeof(state.inputTrace));
+  state.inputTrace.enabled = trace && strcmp(trace, "1") == 0;
   lovrOpenVREventsReset(&state.events);
   state.initialized = true;
   return true;
@@ -387,7 +403,7 @@ static bool connect(void) {
     lovrOpenVRInputReset(&state.input);
     state.inputReady = false;
     lovrOpenVRDisconnect(&state.runtime);
-    lovrSetError("openvr: action assets status %d at %s (errno %d)", assets.status, assets.failingPath, assets.osError);
+    lovrSetError("openvr: action assets status %d at %s (OS error %d)", assets.status, assets.failingPath, assets.osError);
     return false;
   }
   EVRInitError error = lovrOpenVRConnect(&state.runtime, NULL);
@@ -687,11 +703,7 @@ static bool interactionAllowed(void) {
   return active() && state.inputReady && (!state.events.sampled || state.events.inputFocus);
 }
 static void clearInteraction(void) {
-  for (unsigned hand = 0; hand < 2; hand++) {
-    memset(state.input.hands[hand].buttons, 0, sizeof(state.input.hands[hand].buttons));
-    memset(state.input.hands[hand].touches, 0, sizeof(state.input.hands[hand].touches));
-    memset(state.input.hands[hand].axes, 0, sizeof(state.input.hands[hand].axes));
-  }
+  lovrOpenVRInputClearButtons(&state.input);
   lovrOpenVRHapticsClear(&state.haptics);
 }
 static bool pollEvents(void) {
@@ -703,7 +715,12 @@ static bool pollEvents(void) {
   for (Layer* layer = state.all; layer; layer = layer->next)
     if (layer->panel.handle) handles[count++] = layer->panel.handle;
   OpenVREventEffects effects;
-  lovrOpenVREventsUpdate(&state.events, &state.runtime, state.inputReady, (uint32_t) getpid(), handles, count, &effects);
+#ifdef _WIN32
+  uint32_t pid = (uint32_t) _getpid();
+#else
+  uint32_t pid = (uint32_t) getpid();
+#endif
+  lovrOpenVREventsUpdate(&state.events, &state.runtime, state.inputReady, pid, handles, count, &effects);
   pushEventTransitions(&effects);
   if (!state.events.inputFocus) clearInteraction();
   bool ok = true;
@@ -718,6 +735,73 @@ static EVRInputError hapticPulse(void* context, Device device, float strength, f
   return lovrOpenVRInputVibrate(context, device, strength, duration, frequency);
 }
 static double frameClock(void* context) { (void) context; return os_get_time(); }
+
+static void traceControllerProfile(unsigned hand, const OpenVRInputHand* sample, char* profile, uint32_t capacity) {
+  struct VR_IVRInput_FnTable* input = state.runtime.input;
+  struct VR_IVRSystem_FnTable* system = state.runtime.system;
+  TrackedDeviceIndex_t index = k_unTrackedDeviceIndexInvalid;
+  if (!system->GetStringTrackedDeviceProperty) return;
+  VRInputValueHandle_t origin = sample->poses[1].activeOrigin;
+  if (!origin) origin = sample->poses[0].activeOrigin;
+  if (origin && input->GetOriginTrackedDeviceInfo) {
+    InputOriginInfo_t info;
+    if (!input->GetOriginTrackedDeviceInfo(origin, &info, sizeof(info))) index = info.trackedDeviceIndex;
+  }
+  if (index == k_unTrackedDeviceIndexInvalid && system->GetTrackedDeviceIndexForControllerRole) {
+    index = system->GetTrackedDeviceIndexForControllerRole(hand ?
+      ETrackedControllerRole_TrackedControllerRole_RightHand : ETrackedControllerRole_TrackedControllerRole_LeftHand);
+  }
+  if (index == k_unTrackedDeviceIndexInvalid) return;
+  ETrackedPropertyError error;
+  system->GetStringTrackedDeviceProperty(index, ETrackedDeviceProperty_Prop_ControllerType_String, profile, capacity, &error);
+  if (error != ETrackedPropertyError_TrackedProp_Success) profile[0] = '\0';
+  profile[capacity - 1] = '\0';
+}
+
+static void traceInput(OpenVRFrameResult result, EVRInputError error) {
+  if (!state.inputTrace.enabled) return;
+  const OpenVRFrameSnapshot* frame = &state.frame.snapshot;
+  bool focus = interactionAllowed();
+  state.inputTrace.frames++;
+  state.inputTrace.noHead += !frame->head.valid;
+  state.inputTrace.noViews += !frame->eyes[0].pose.valid || !frame->eyes[1].pose.valid;
+  state.inputTrace.invalidFrames += result.status == OPENVR_FRAME_INVALID;
+  state.inputTrace.inputErrors += error != EVRInputError_VRInputError_None;
+  for (unsigned h = 0; h < 2; h++) {
+    Device hand = h ? DEVICE_HAND_RIGHT : DEVICE_HAND_LEFT;
+    bool down, changed;
+    lovrOpenVRInputIsDown(&state.input, hand, BUTTON_TRIGGER, &down, &changed);
+    down &= focus;
+    state.inputTrace.presses[h] += down && !state.inputTrace.down[h];
+    state.inputTrace.down[h] = down;
+    float stick[2];
+    if (focus && lovrOpenVRInputGetAxis(&state.input, hand, AXIS_THUMBSTICK, stick)) {
+      state.inputTrace.stickPeak[h] = fmaxf(state.inputTrace.stickPeak[h], fmaxf(fabsf(stick[0]), fabsf(stick[1])));
+    }
+  }
+  double now = os_get_time();
+  if (now < state.inputTrace.next) return;
+  state.inputTrace.next = now + 1.;
+  struct VR_IVRApplications_FnTable* applications = state.runtime.applications;
+  uint32_t scene = applications && applications->GetCurrentSceneProcessId ? applications->GetCurrentSceneProcessId() : 0;
+  lovrLog(LOG_INFO, "XR", "OpenVR trace: scene-pid=%u focus=%u frames=%u no-head=%u no-views=%u invalid-frame=%u input-errors=%u (last=%d) prediction=%.3fs",
+    scene, focus, state.inputTrace.frames, state.inputTrace.noHead, state.inputTrace.noViews,
+    state.inputTrace.invalidFrames, state.inputTrace.inputErrors, error, frame->prediction);
+  state.inputTrace.frames = state.inputTrace.noHead = state.inputTrace.noViews = 0;
+  state.inputTrace.invalidFrames = state.inputTrace.inputErrors = 0;
+  for (unsigned h = 0; h < 2; h++) {
+    const OpenVRInputHand* sample = &state.input.hands[h];
+    char profile[128] = { 0 };
+    traceControllerProfile(h, sample, profile, sizeof(profile));
+    lovrLog(LOG_INFO, "XR", "OpenVR trace: %s profile=%s grip-pose=%u aim-pose=%u trigger=%u trigger-axis=%u stick=%u presses=%u stick-peak=%.2f",
+      h ? "right" : "left", profile[0] ? profile : "unavailable", sample->poses[0].bActive, sample->poses[1].bActive,
+      sample->buttons[0].bActive, sample->axes[0].bActive, sample->axes[1].bActive, state.inputTrace.presses[h],
+      state.inputTrace.stickPeak[h]);
+    state.inputTrace.presses[h] = 0;
+    state.inputTrace.stickPeak[h] = 0.f;
+  }
+}
+
 static bool update(void) {
   lovrAssert(active(), "openvr: frame update requires an active session");
   ETrackingUniverseOrigin origin = state.config.seated ? ETrackingUniverseOrigin_TrackingUniverseSeated : ETrackingUniverseOrigin_TrackingUniverseStanding;
@@ -727,13 +811,20 @@ static bool update(void) {
   state.scene.overlaid = false;
   OpenVRFrameResult result = lovrOpenVRFrameUpdate(&state.frame, origin, frameClock, NULL);
   state.inputSerial = 0;
-  lovrOpenVRInputClear(&state.input);
-  if (result.status == OPENVR_FRAME_OK || result.status == OPENVR_FRAME_TIMEOUT) {
-    EVRInputError error = lovrOpenVRInputUpdate(&state.input, state.frame.snapshot.origin, state.frame.snapshot.prediction);
+  const OpenVRFrameSnapshot* frame = &state.frame.snapshot;
+  if (result.status != OPENVR_FRAME_RUNTIME_ERROR && frame->serial) {
+    // Controller actions do not require valid eye timing or a predicted HMD pose.
+    bool fallback = result.status == OPENVR_FRAME_INVALID;
+    if (fallback && !projectionResult(lovrOpenVRProjectionHide(&state.scene.projection))) {
+      lovrOpenVRInputClear(&state.input);
+      return false;
+    }
+    EVRInputError error = lovrOpenVRInputUpdate(&state.input, frame->origin, fallback ? 0.f : frame->prediction);
+    traceInput(result, error);
     if (error != EVRInputError_VRInputError_None) return failInputUpdate("action snapshot", error);
     if (!interactionAllowed()) {
       clearInteraction();
-      state.inputSerial = state.frame.snapshot.serial;
+      state.inputSerial = frame->serial;
       return true;
     }
     for (unsigned hand = 0; hand < 2; hand++) {
@@ -742,9 +833,11 @@ static bool update(void) {
     }
     error = lovrOpenVRHapticsTick(&state.haptics, state.generation, os_get_time(), hapticPulse, &state.input);
     if (error != EVRInputError_VRInputError_None) return failInputUpdate("deferred haptic", error);
-    state.inputSerial = state.frame.snapshot.serial;
+    state.inputSerial = frame->serial;
     return true;
   }
+  lovrOpenVRInputClear(&state.input);
+  traceInput(result, EVRInputError_VRInputError_None);
   OpenVRProjectionResult hidden = invalidateFrame();
   if (result.status == OPENVR_FRAME_RUNTIME_ERROR) {
     lovrSetError("openvr: frame update error %d (overlay %d); scene hide: %s eye %u error %d (cleanup %d)",

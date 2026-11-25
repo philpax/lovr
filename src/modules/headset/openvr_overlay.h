@@ -1,7 +1,7 @@
 #ifndef LOVR_OPENVR_OVERLAY_H
 #define LOVR_OPENVR_OVERLAY_H
 
-#include <openvr_capi.h>
+#include "openvr_api.h"
 
 typedef enum {
   OPENVR_PANEL_OK,

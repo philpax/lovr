@@ -1,0 +1,65 @@
+{
+  "controller_type": "vd_hand_controller",
+  "name": "LÖVR Virtual Desktop hand tracking",
+  "description": "Index pinch selects and hand grip grabs. This profile exposes no thumbstick.",
+  "bindings": {
+    "/actions/lovr": {
+      "poses": [
+        {
+          "output": "/actions/lovr/in/grip_pose",
+          "path": "/user/hand/left/pose/openxr_grip"
+        },
+        {
+          "output": "/actions/lovr/in/aim_pose",
+          "path": "/user/hand/left/pose/openxr_aim"
+        },
+        {
+          "output": "/actions/lovr/in/grip_pose",
+          "path": "/user/hand/right/pose/openxr_grip"
+        },
+        {
+          "output": "/actions/lovr/in/aim_pose",
+          "path": "/user/hand/right/pose/openxr_aim"
+        }
+      ],
+      "sources": [
+        {
+          "path": "/user/hand/left/input/index_pinch",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/lovr/in/trigger_axis"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/grip",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/lovr/in/grip_axis"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/index_pinch",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/lovr/in/trigger_axis"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/grip",
+          "mode": "trigger",
+          "inputs": {
+            "pull": {
+              "output": "/actions/lovr/in/grip_axis"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
